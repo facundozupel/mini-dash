@@ -1,0 +1,25 @@
+# Secrets — NUNCA al repo
+.env
+*.env.local
+*.env.prod
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+
+# Node (por si el dia de manana)
+node_modules/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db

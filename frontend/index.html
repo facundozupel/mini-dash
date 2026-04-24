@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MiniDash · Endado</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header>
+    <h1>MiniDash · Endado</h1>
+    <div class="controls">
+      <label>Desde <input type="date" id="from" /></label>
+      <label>Hasta <input type="date" id="to" /></label>
+      <button id="apply">Aplicar</button>
+      <div id="loading" class="loading-badge hidden">
+        <div class="spinner"></div>
+        <span id="loading-text">cargando…</span>
+      </div>
+    </div>
+  </header>
+
+  <nav class="tabs">
+    <button class="tab active" data-filter="overall">Overall</button>
+    <button class="tab" data-filter="products">Productos</button>
+    <button class="tab" data-filter="category">Categorías (hubs)</button>
+    <button class="tab" data-filter="recambios">/recambios</button>
+  </nav>
+
+  <section class="metric-block">
+    <div class="kpis" id="kpis"></div>
+    <div class="chart-toolbar">
+      <span class="chart-toolbar-label" id="chart-range-label">Evolución · últimos 24 meses</span>
+      <div class="seg" role="tablist">
+        <button class="seg-btn" data-gran="day">Día</button>
+        <button class="seg-btn" data-gran="week">Semana</button>
+        <button class="seg-btn active" data-gran="month">Mes</button>
+      </div>
+    </div>
+    <div class="chart-wrap"><canvas id="trend-chart"></canvas></div>
+  </section>
+
+  <section class="tables">
+    <details open>
+      <summary>Top 20 Productos</summary>
+      <div id="top-products-table"></div>
+    </details>
+    <details>
+      <summary>Top 20 Categorías (hubs)</summary>
+      <div id="top-categories-table"></div>
+    </details>
+    <details>
+      <summary>Oportunidades (queries pos 10-20)</summary>
+      <div id="opportunities-table"></div>
+    </details>
+    <details>
+      <summary>Canibalización de productos</summary>
+      <div id="cannibalization-table"></div>
+    </details>
+  </section>
+
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <script type="module" src="main.js"></script>
+</body>
+</html>
