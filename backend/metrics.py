@@ -9,6 +9,7 @@ from dataclasses import dataclass
 
 from psycopg.rows import dict_row
 
+from bucket_cache import BucketCache
 from db.conn import pool
 
 # --- Filtros por tipo de pagina (hardcoded, no user input = safe) ---
@@ -43,17 +44,22 @@ def compute_ranges(from_: dt.date, to_: dt.date) -> tuple[Range, Range, Range]:
 
 
 # --- SQL templates (el {filter} se reemplaza desde FILTERS) ---
-_KPIS_SQL = """
+
+# KPIs por dia para el bucket cache (L2). Devuelve componentes crudos:
+#   clicks         -> aditivo
+#   impressions    -> aditivo (= denominador de pos avg, page-level no dedupa)
+#   pos_num        -> SUM(position * impressions), aditivo
+# Para componer un rango: ctr = sum(clicks)/sum(imp); pos = sum(pos_num)/sum(imp).
+_KPIS_BUCKET_SQL = """
 SELECT
-    COALESCE(SUM(clicks), 0)::bigint                                  AS clicks,
-    COALESCE(SUM(impressions), 0)::bigint                             AS impressions,
-    CASE WHEN SUM(impressions) > 0
-         THEN SUM(clicks)::float / SUM(impressions) ELSE 0 END        AS ctr,
-    CASE WHEN SUM(impressions) > 0
-         THEN SUM(position * impressions) / SUM(impressions) ELSE 0 END AS position
+    date,
+    COALESCE(SUM(clicks), 0)::bigint                            AS clicks,
+    COALESCE(SUM(impressions), 0)::bigint                       AS impressions,
+    COALESCE(SUM(position * impressions), 0)::float             AS pos_num
 FROM extraccion_gsc_page
-WHERE date BETWEEN %(start)s AND %(end)s
+WHERE date = ANY(%(days)s)
   AND ({filter})
+GROUP BY date
 """
 
 _TREND_SQL = """
@@ -73,12 +79,55 @@ VALID_GRANULARITIES = {"day", "week", "month"}
 TREND_MONTHS_BACK = 24  # "mapa panoramico" fijo
 
 
-def _run_kpis(filter_name: str, rng: Range) -> dict:
-    sql = _KPIS_SQL.format(filter=FILTERS[filter_name])
+def _fetch_kpi_days(filter_name: str, days: list[dt.date]) -> dict[dt.date, dict]:
+    """Trae los componentes crudos para los dias dados, en una sola query."""
+    if not days:
+        return {}
+    sql = _KPIS_BUCKET_SQL.format(filter=FILTERS[filter_name])
     with pool.connection() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
-            cur.execute(sql, {"start": rng.start, "end": rng.end})
-            return cur.fetchone()
+            cur.execute(sql, {"days": days})
+            rows = cur.fetchall()
+    return {
+        r["date"]: {
+            "clicks": r["clicks"],
+            "impressions": r["impressions"],
+            "pos_num": r["pos_num"],
+        }
+        for r in rows
+    }
+
+
+def _empty_kpi_day() -> dict:
+    return {"clicks": 0, "impressions": 0, "pos_num": 0.0}
+
+
+def _compose_kpis(comps: list[dict]) -> dict:
+    """Reduce per-day components a la metric final (clicks, imp, ctr, position)."""
+    clicks = sum(c["clicks"] for c in comps)
+    imp = sum(c["impressions"] for c in comps)
+    pos_num = sum(c["pos_num"] for c in comps)
+    return {
+        "clicks": clicks,
+        "impressions": imp,
+        "ctr": (clicks / imp) if imp else 0.0,
+        "position": (pos_num / imp) if imp else 0.0,
+    }
+
+
+# Bucket cache (L2): comparte el _store con @snapshot.
+# Keys: "kpi_bucket:{filter_name}:{YYYY-MM-DD}".
+_kpi_bucket = BucketCache(
+    name="kpi_bucket",
+    fetch_days=_fetch_kpi_days,
+    compose=_compose_kpis,
+    empty=_empty_kpi_day,
+)
+
+
+def _run_kpis(filter_name: str, rng: Range) -> dict:
+    """Devuelve KPIs componiendo desde bucket cache (L2)."""
+    return _kpi_bucket.get_range(filter_name, rng.start, rng.end)
 
 
 def _run_trend(filter_name: str, rng: Range, gran: str) -> list[dict]:
