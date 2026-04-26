@@ -41,7 +41,36 @@ function setLoading(on, text = "cargando…") {
   document.getElementById("loading").classList.toggle("hidden", !on);
   document.getElementById("loading-text").textContent = text;
   document.getElementById("apply").disabled = on;
-  document.body.classList.toggle("is-loading", on);
+}
+
+// ============================================================
+//  Skeletons (placeholders mientras carga)
+//  Cada loadX() llama su skeleton ANTES del fetch, asi nunca
+//  se ve data vieja mientras llega data nueva.
+// ============================================================
+function renderKPIsSkeleton() {
+  const card = `
+    <div class="kpi">
+      <div class="kpi-label"><span class="sk sk-text" style="width:60%">&nbsp;</span></div>
+      <div class="kpi-value"><span class="sk sk-block" style="width:75%">&nbsp;</span></div>
+      <div class="kpi-compare">
+        <span><span class="sk sk-text" style="width:55%">&nbsp;</span></span>
+        <span><span class="sk sk-text" style="width:60%">&nbsp;</span></span>
+      </div>
+    </div>`;
+  document.getElementById("kpis").innerHTML = card.repeat(4);
+}
+
+function setTrendLoading(on) {
+  document.getElementById("trend-loading").classList.toggle("hidden", !on);
+}
+
+function renderTableSkeleton(containerId, { rows = 6, cols = 6 } = {}) {
+  const tr = `<tr>${Array.from({ length: cols }).map(() =>
+    `<td><span class="sk sk-text" style="width:80%">&nbsp;</span></td>`
+  ).join("")}</tr>`;
+  document.getElementById(containerId).innerHTML =
+    `<table><tbody>${tr.repeat(rows)}</tbody></table>`;
 }
 
 async function fetchJSON(path, extraParams = {}) {
@@ -221,18 +250,30 @@ function escapeHtml(s) {
 // ============================================================
 // Carga SOLO KPIs (dependen de filter + date picker)
 async function loadMetrics() {
+  renderKPIsSkeleton();
   const m = await fetchJSON(`/metrics/${state.filter}`);
   renderKPIs(m.data);
 }
 
 // Carga SOLO trend (depende de filter + granularity, rango fijo 24m)
 async function loadTrend() {
-  const t = await fetchJSON(`/trend/${state.filter}`, { granularity: state.granularity });
-  renderTrend(t.data.points);
+  setTrendLoading(true);
+  try {
+    const t = await fetchJSON(`/trend/${state.filter}`, { granularity: state.granularity });
+    renderTrend(t.data.points);
+  } finally {
+    setTrendLoading(false);
+  }
 }
 
 // Carga SOLO tablas (dependen de date picker, no de filter ni granularity)
 async function loadTables() {
+  // Skeleton por tabla (cols aproximadas, no es critico que coincida exacto).
+  renderTableSkeleton("top-products-table",   { cols: 8 });
+  renderTableSkeleton("top-categories-table", { cols: 7 });
+  renderTableSkeleton("opportunities-table",  { cols: 6 });
+  renderTableSkeleton("cannibalization-table",{ cols: 5 });
+
   const [topProducts, topCategories, opportunities, cannibalization] = await Promise.all([
     fetchJSON("/tables/top-products", { limit: 20 }),
     fetchJSON("/tables/top-categories", { limit: 20 }),

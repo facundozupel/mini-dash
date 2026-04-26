@@ -37,7 +37,10 @@
         <button class="seg-btn active" data-gran="month">Mes</button>
       </div>
     </div>
-    <div class="chart-wrap"><canvas id="trend-chart"></canvas></div>
+    <div class="chart-wrap">
+      <div id="trend-loading" class="chart-loading hidden"><div class="spinner"></div><span>cargando trend…</span></div>
+      <canvas id="trend-chart"></canvas>
+    </div>
   </section>
 
   <section class="tables">

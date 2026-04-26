@@ -68,18 +68,42 @@ h1 { margin: 0; font-size: 22px; letter-spacing: -0.5px; }
 }
 @keyframes spin { to { transform: rotate(360deg); } }
 
-/* Dim content cuando hay fetch en curso */
-body.is-loading .metric-block,
-body.is-loading .tables {
-  opacity: 0.45;
-  pointer-events: none;
-  transition: opacity 0.15s;
-}
-
 /* Disable apply button while loading */
 .controls button:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+/* ---------- skeleton (shimmer) ---------- */
+.sk {
+  display: inline-block;
+  background: linear-gradient(90deg, var(--bg-hover) 25%, #2c3142 50%, var(--bg-hover) 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.4s ease-in-out infinite;
+  border-radius: 4px;
+  color: transparent;
+  vertical-align: middle;
+}
+.sk-text  { height: 12px; min-width: 40px; }
+.sk-block { height: 26px; min-width: 80px; }
+@keyframes shimmer {
+  0%   { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+/* Chart loading overlay (encima del canvas, no lo destruye) */
+.chart-loading {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  color: var(--text-muted);
+  font-size: 13px;
+  background: var(--bg-card);
+  border-radius: 8px;
+  z-index: 1;
 }
 
 /* ---------- tabs ---------- */
@@ -149,6 +173,7 @@ body.is-loading .tables {
 
 /* ---------- chart ---------- */
 .chart-wrap {
+  position: relative;
   background: var(--bg-card);
   border: 1px solid var(--border);
   border-radius: 8px;
