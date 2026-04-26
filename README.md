@@ -16,7 +16,11 @@ Lee de la DB de endado existente (Postgres en VPS), agrega KPIs / tablas / trend
 - Backend: FastAPI + psycopg3 + cachetools
 - DB: Postgres (existente, read-only)
 - Frontend: HTML + JS vanilla + Chart.js
-- Cache: in-process TTL 24h con prewarm al boot
+- Cache: in-process TTL 24h con prewarm al boot, **dos capas**:
+  - **L1 (`@snapshot`)** — cachea respuestas finales por `(filtro, from, to)`. Una sola fuente de verdad para keys via `warm()`.
+  - **L2 (`BucketCache`)** — cachea componentes per-day y compone rangos al vuelo. Mover el date picker un dia recomputa ~2 dias en vez de 90.
+  - Storage detras de un `CacheStore` Protocol → swap a Redis o mock para tests sin tocar callers.
+  - Stats hit/miss per-key expuestas en `/internal/cache/stats` para medir antes de optimizar.
 
 ## Quick start (local)
 
@@ -56,6 +60,8 @@ El boot tarda ~60s en estar 100% caliente (prewarm en background). El servidor r
 | `GET /tables/cannibalization?from=&to=&limit=50` | Queries con >1 URL de producto compitiendo |
 | `GET /health` | Healthcheck (DB connectivity) |
 | `POST /internal/cache/flush` | Limpia cache (header `x-internal-secret`) |
+| `GET /internal/cache/stats` | Hit/miss per-key (header `x-internal-secret`) |
+| `POST /internal/cache/stats/clear` | Reset contadores (header `x-internal-secret`) |
 
 ## Estructura
 
@@ -77,5 +83,9 @@ MICRO-DASH/
 
 - [x] Local end-to-end con data real
 - [x] Indices creados en DB endado para perf
+- [x] Cache "deepada": `@snapshot` decorator (L1) + `CacheStore` Protocol (testeable sin DB)
+- [x] Bucket cache (L2) para `/metrics/*` con componentes per-day reusables
+- [x] Stats hit/miss per-key (`/internal/cache/stats`) para decidir optimizaciones con datos
+- [ ] Tests unitarios
 - [ ] Auth (Google Sign-In + JWT)
 - [ ] Deploy
