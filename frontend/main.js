@@ -120,15 +120,31 @@ function kpiCard(label, value, momDelta, yoyDelta, opts) {
 function renderTrend(trend) {
   const ctx = document.getElementById("trend-chart");
   if (chart) chart.destroy();
+
+  // Editorial palette — read from CSS vars so el chart respeta el theme
+  const css = getComputedStyle(document.documentElement);
+  const ink     = css.getPropertyValue("--ink").trim()      || "#1a1815";
+  const ink2    = css.getPropertyValue("--ink-2").trim()    || "#5a564f";
+  const ink3    = css.getPropertyValue("--ink-3").trim()    || "#9b958a";
+  const accent  = css.getPropertyValue("--accent").trim()   || "#8b3a2f";
+  const rule    = css.getPropertyValue("--rule").trim()     || "#d8d3c5";
+  const paper   = css.getPropertyValue("--paper").trim()    || "#f7f5ee";
+  const monoFont = '"JetBrains Mono", ui-monospace, monospace';
+  const serifFont = '"Fraunces", Georgia, serif';
+
   chart = new Chart(ctx, {
     type: "line",
     data: {
       labels: trend.map((d) => d.date),
       datasets: [
         { label: "Clicks",      data: trend.map((d) => d.clicks),
-          borderColor: "#5da8ff", backgroundColor: "#5da8ff22", yAxisID: "y", tension: 0.3, pointRadius: 0 },
+          borderColor: ink, backgroundColor: "transparent", borderWidth: 1.5,
+          yAxisID: "y", tension: 0.35, pointRadius: 0, pointHoverRadius: 4,
+          pointHoverBackgroundColor: ink, pointHoverBorderColor: paper, pointHoverBorderWidth: 2 },
         { label: "Impresiones", data: trend.map((d) => d.impressions),
-          borderColor: "#facc15", backgroundColor: "#facc1522", yAxisID: "y1", tension: 0.3, pointRadius: 0 },
+          borderColor: accent, backgroundColor: "transparent", borderWidth: 1,
+          borderDash: [3, 4], yAxisID: "y1", tension: 0.35, pointRadius: 0, pointHoverRadius: 4,
+          pointHoverBackgroundColor: accent, pointHoverBorderColor: paper, pointHoverBorderWidth: 2 },
       ],
     },
     options: {
@@ -136,13 +152,47 @@ function renderTrend(trend) {
       maintainAspectRatio: false,
       interaction: { mode: "index", intersect: false },
       scales: {
-        y:  { position: "left",  title: { display: true, text: "Clicks",      color: "#8b92a3" }, ticks: { color: "#8b92a3" }, grid: { color: "#262b35" } },
-        y1: { position: "right", title: { display: true, text: "Impresiones", color: "#8b92a3" }, ticks: { color: "#8b92a3" }, grid: { display: false } },
-        x:  { ticks: { color: "#8b92a3", maxRotation: 0, autoSkipPadding: 30 }, grid: { color: "#262b35" } },
+        y:  { position: "left",
+              border: { display: false },
+              title: { display: false },
+              ticks: { color: ink3, font: { family: monoFont, size: 10 }, padding: 10 },
+              grid:  { color: rule, drawTicks: false } },
+        y1: { position: "right",
+              border: { display: false },
+              title: { display: false },
+              ticks: { color: ink3, font: { family: monoFont, size: 10 }, padding: 10 },
+              grid:  { display: false } },
+        x:  { border: { display: false },
+              ticks: { color: ink3, font: { family: monoFont, size: 10 }, maxRotation: 0, autoSkipPadding: 36, padding: 8 },
+              grid:  { display: false } },
       },
       plugins: {
-        legend: { labels: { color: "#e7eaf0" } },
-        tooltip: { backgroundColor: "#181b22", titleColor: "#e7eaf0", bodyColor: "#e7eaf0", borderColor: "#262b35", borderWidth: 1 },
+        legend: {
+          align: "end",
+          labels: {
+            color: ink2,
+            font: { family: monoFont, size: 10 },
+            usePointStyle: true,
+            pointStyle: "line",
+            boxWidth: 24,
+            padding: 16,
+          },
+        },
+        tooltip: {
+          backgroundColor: paper,
+          titleColor: ink,
+          bodyColor: ink,
+          borderColor: rule,
+          borderWidth: 1,
+          padding: 12,
+          cornerRadius: 0,
+          titleFont: { family: monoFont, size: 10, weight: "500" },
+          bodyFont:  { family: serifFont, size: 13 },
+          displayColors: true,
+          boxWidth: 8,
+          boxHeight: 8,
+          boxPadding: 4,
+        },
       },
     },
   });
@@ -226,8 +276,8 @@ function renderCannibalizationTable(rows) {
   const body = rows.map((r) => {
     const urlsList = (r.urls || []).slice(0, 5).map((u) => {
       const path = u.page.replace(/^https?:\/\/www\.endado\.com/, "") || "/";
-      return `<a href="${u.page}" target="_blank" rel="noopener" title="${u.page}">${path}</a> <span style="color:#8b92a3">(cl ${u.clicks}, pos ${fmt.pos(u.position)})</span>`;
-    }).join("<br>");
+      return `<div class="canib-url"><a href="${u.page}" target="_blank" rel="noopener" title="${u.page}">${path}</a> <span class="canib-meta">cl ${u.clicks} · pos ${fmt.pos(u.position)}</span></div>`;
+    }).join("");
     return `
       <tr>
         <td>${escapeHtml(r.query)}</td>

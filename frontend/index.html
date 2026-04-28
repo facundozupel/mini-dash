@@ -4,15 +4,30 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>MiniDash · Endado</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght,SOFT@0,9..144,300..800,0..100;1,9..144,300..800,0..100&family=JetBrains+Mono:wght@400;500;600&display=swap" />
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
-  <header>
-    <h1>MiniDash · Endado</h1>
+  <header class="masthead">
+    <div class="brand">
+      <span class="kicker">Dashboard CRO · Endado.com</span>
+      <h1>MiniDash</h1>
+    </div>
     <div class="controls">
-      <label>Desde <input type="date" id="from" /></label>
-      <label>Hasta <input type="date" id="to" /></label>
-      <button id="apply">Aplicar</button>
+      <label class="ctrl">
+        <span class="ctrl-label">Desde</span>
+        <input type="date" id="from" />
+      </label>
+      <label class="ctrl">
+        <span class="ctrl-label">Hasta</span>
+        <input type="date" id="to" />
+      </label>
+      <button id="apply">
+        <span>Aplicar</span>
+        <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 8h10M9 4l4 4-4 4"/></svg>
+      </button>
       <div id="loading" class="loading-badge hidden">
         <div class="spinner"></div>
         <span id="loading-text">cargando…</span>
@@ -23,20 +38,25 @@
   <nav class="tabs">
     <button class="tab active" data-filter="overall">Overall</button>
     <button class="tab" data-filter="products">Productos</button>
-    <button class="tab" data-filter="category">Categorías (hubs)</button>
-    <button class="tab" data-filter="recambios">/recambios</button>
+    <button class="tab" data-filter="category">Categorías</button>
+    <button class="tab" data-filter="recambios">Recambios</button>
   </nav>
 
   <section class="metric-block">
     <div class="kpis" id="kpis"></div>
+
     <div class="chart-toolbar">
-      <span class="chart-toolbar-label" id="chart-range-label">Evolución · últimos 24 meses</span>
+      <div class="chart-toolbar-meta">
+        <span class="kicker">Evolución</span>
+        <span class="chart-toolbar-label" id="chart-range-label">últimos 24 meses</span>
+      </div>
       <div class="seg" role="tablist">
-        <button class="seg-btn" data-gran="day">Día</button>
-        <button class="seg-btn" data-gran="week">Semana</button>
-        <button class="seg-btn active" data-gran="month">Mes</button>
+        <button class="seg-btn" data-gran="day">día</button>
+        <button class="seg-btn" data-gran="week">semana</button>
+        <button class="seg-btn active" data-gran="month">mes</button>
       </div>
     </div>
+
     <div class="chart-wrap">
       <div id="trend-loading" class="chart-loading hidden"><div class="spinner"></div><span>cargando trend…</span></div>
       <canvas id="trend-chart"></canvas>
@@ -45,22 +65,27 @@
 
   <section class="tables">
     <details open>
-      <summary>Top 20 Productos</summary>
+      <summary><span class="num">01</span><span class="title">Top 20 Productos</span></summary>
       <div id="top-products-table"></div>
     </details>
     <details>
-      <summary>Top 20 Categorías (hubs)</summary>
+      <summary><span class="num">02</span><span class="title">Top 20 Categorías</span></summary>
       <div id="top-categories-table"></div>
     </details>
     <details>
-      <summary>Oportunidades (queries pos 10-20)</summary>
+      <summary><span class="num">03</span><span class="title">Oportunidades · queries posición 10–20</span></summary>
       <div id="opportunities-table"></div>
     </details>
     <details>
-      <summary>Canibalización de productos</summary>
+      <summary><span class="num">04</span><span class="title">Canibalización de productos</span></summary>
       <div id="cannibalization-table"></div>
     </details>
   </section>
+
+  <footer class="colofon">
+    <span>endado.com · datos GSC</span>
+    <span>actualizado diariamente · 03:00</span>
+  </footer>
 
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
   <script type="module" src="main.js"></script>
