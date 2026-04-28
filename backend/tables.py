@@ -1,8 +1,8 @@
 """
 Tablas del dashboard:
-- top_pages (top productos / top categorias): usa extraccion_gsc_page
-- opportunities (queries pos 10-20):           usa extraccion_gsc
-- cannibalization (queries con >1 URL prod):   usa extraccion_gsc
+- top_pages (top productos / top categorias): marts.top_pages_diario
+- opportunities (queries pos 10-20):           marts.kpis_query_diario + canib_query_page_daily
+- cannibalization (queries con >1 URL prod):   marts.canib_query_page_daily + marts.kpis_query_diario
 """
 import datetime as dt
 
@@ -16,11 +16,15 @@ from metrics import FILTERS, compute_ranges
 # 1) TOP PAGES (top-products + top-categories)
 # =====================================================================
 
+# Lee de marts.top_pages_diario (filter pre-explotado, grano filter+page+date).
+# Filter va como bind param, no como template SQL.
+
 _TOP_PAGES_SQL = """
 WITH top AS (
     SELECT page, SUM(clicks) AS clicks
-    FROM extraccion_gsc_page
-    WHERE date BETWEEN %(cur_s)s AND %(cur_e)s AND ({filter})
+    FROM marts.top_pages_diario
+    WHERE event_date BETWEEN %(cur_s)s AND %(cur_e)s
+      AND filter = %(filter)s
     GROUP BY page
     ORDER BY clicks DESC
     LIMIT %(limit)s
@@ -31,9 +35,10 @@ cur AS (
         SUM(clicks)::bigint AS clicks,
         SUM(impressions)::bigint AS impressions,
         CASE WHEN SUM(impressions)>0 THEN SUM(clicks)::float/SUM(impressions) ELSE 0 END AS ctr,
-        CASE WHEN SUM(impressions)>0 THEN SUM(position*impressions)/SUM(impressions) ELSE 0 END AS position
-    FROM extraccion_gsc_page
-    WHERE date BETWEEN %(cur_s)s AND %(cur_e)s AND ({filter})
+        CASE WHEN SUM(impressions)>0 THEN SUM(pos_num)/SUM(impressions) ELSE 0 END AS position
+    FROM marts.top_pages_diario
+    WHERE event_date BETWEEN %(cur_s)s AND %(cur_e)s
+      AND filter = %(filter)s
       AND page IN (SELECT page FROM top)
     GROUP BY page
 ),
@@ -42,9 +47,10 @@ mom AS (
         SUM(clicks)::bigint AS clicks,
         SUM(impressions)::bigint AS impressions,
         CASE WHEN SUM(impressions)>0 THEN SUM(clicks)::float/SUM(impressions) ELSE 0 END AS ctr,
-        CASE WHEN SUM(impressions)>0 THEN SUM(position*impressions)/SUM(impressions) ELSE 0 END AS position
-    FROM extraccion_gsc_page
-    WHERE date BETWEEN %(mom_s)s AND %(mom_e)s AND ({filter})
+        CASE WHEN SUM(impressions)>0 THEN SUM(pos_num)/SUM(impressions) ELSE 0 END AS position
+    FROM marts.top_pages_diario
+    WHERE event_date BETWEEN %(mom_s)s AND %(mom_e)s
+      AND filter = %(filter)s
       AND page IN (SELECT page FROM top)
     GROUP BY page
 ),
@@ -53,9 +59,10 @@ yoy AS (
         SUM(clicks)::bigint AS clicks,
         SUM(impressions)::bigint AS impressions,
         CASE WHEN SUM(impressions)>0 THEN SUM(clicks)::float/SUM(impressions) ELSE 0 END AS ctr,
-        CASE WHEN SUM(impressions)>0 THEN SUM(position*impressions)/SUM(impressions) ELSE 0 END AS position
-    FROM extraccion_gsc_page
-    WHERE date BETWEEN %(yoy_s)s AND %(yoy_e)s AND ({filter})
+        CASE WHEN SUM(impressions)>0 THEN SUM(pos_num)/SUM(impressions) ELSE 0 END AS position
+    FROM marts.top_pages_diario
+    WHERE event_date BETWEEN %(yoy_s)s AND %(yoy_e)s
+      AND filter = %(filter)s
       AND page IN (SELECT page FROM top)
     GROUP BY page
 )
@@ -82,11 +89,11 @@ def compute_top_pages(filter_name: str, from_: dt.date, to_: dt.date, limit: int
         raise ValueError(f"filter desconocido: {filter_name}")
 
     cur_r, mom_r, yoy_r = compute_ranges(from_, to_)
-    sql = _TOP_PAGES_SQL.format(filter=FILTERS[filter_name])
 
     with pool.connection() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
-            cur.execute(sql, {
+            cur.execute(_TOP_PAGES_SQL, {
+                "filter": filter_name,
                 "cur_s": cur_r.start, "cur_e": cur_r.end,
                 "mom_s": mom_r.start, "mom_e": mom_r.end,
                 "yoy_s": yoy_r.start, "yoy_e": yoy_r.end,
@@ -141,90 +148,63 @@ def _format_row(r: dict) -> dict:
 # =====================================================================
 # 2) OPPORTUNITIES: queries en posicion 10-20 con volumen
 # =====================================================================
+#
+# Marts usados:
+#   - marts.kpis_query_diario       : impressions_dedup + pos_num + impressions_sum
+#                                     (la dedup MAX por (query, date) ya esta pre-calculada)
+#   - marts.canib_query_page_daily  : VIEW query+page+date para top_url
 
 _OPPORTUNITIES_SQL = """
-WITH per_q_d AS (
-    -- impresiones DEDUPLICADAS por query+date (MAX), y posicion ponderada por imp dentro del dia
-    SELECT
-        query, date,
-        MAX(impressions)::bigint                                        AS impressions,
-        SUM(position * impressions) / NULLIF(SUM(impressions), 0)       AS position
-    FROM extraccion_gsc
-    WHERE date BETWEEN %(cur_s)s AND %(cur_e)s
-    GROUP BY query, date
-),
-per_q AS (
+WITH per_q AS (
     SELECT
         query,
-        SUM(impressions)::bigint                                         AS impressions,
-        SUM(position * impressions) / NULLIF(SUM(impressions), 0)        AS position
-    FROM per_q_d
+        SUM(impressions_dedup)::bigint                         AS impressions,
+        SUM(pos_num) / NULLIF(SUM(impressions_sum), 0)         AS position
+    FROM marts.kpis_query_diario
+    WHERE event_date BETWEEN %(cur_s)s AND %(cur_e)s
     GROUP BY query
 ),
 clicks_q AS (
     SELECT query, SUM(clicks)::bigint AS clicks
-    FROM extraccion_gsc
-    WHERE date BETWEEN %(cur_s)s AND %(cur_e)s
+    FROM marts.kpis_query_diario
+    WHERE event_date BETWEEN %(cur_s)s AND %(cur_e)s
     GROUP BY query
 ),
 top_url AS (
     SELECT DISTINCT ON (query) query, page
     FROM (
         SELECT query, page, SUM(impressions) AS imp
-        FROM extraccion_gsc
-        WHERE date BETWEEN %(cur_s)s AND %(cur_e)s
+        FROM marts.canib_query_page_daily
+        WHERE event_date BETWEEN %(cur_s)s AND %(cur_e)s
         GROUP BY query, page
     ) t
     ORDER BY query, imp DESC
 ),
--- periodos anteriores (clicks + dedup impresiones, sin filtro posicion)
 per_q_mom AS (
-    SELECT q.query,
-        COALESCE(SUM(c.clicks), 0)::bigint AS clicks,
-        COALESCE(SUM(i.impressions), 0)::bigint AS impressions
-    FROM (SELECT DISTINCT query FROM per_q) q
-    LEFT JOIN (
-        SELECT query, SUM(clicks) AS clicks
-        FROM extraccion_gsc
-        WHERE date BETWEEN %(mom_s)s AND %(mom_e)s
-        GROUP BY query
-    ) c ON c.query = q.query
-    LEFT JOIN (
-        SELECT query, SUM(max_imp) AS impressions FROM (
-            SELECT query, date, MAX(impressions) AS max_imp
-            FROM extraccion_gsc
-            WHERE date BETWEEN %(mom_s)s AND %(mom_e)s
-            GROUP BY query, date
-        ) t GROUP BY query
-    ) i ON i.query = q.query
-    GROUP BY q.query
+    SELECT
+        query,
+        COALESCE(SUM(clicks), 0)::bigint               AS clicks,
+        COALESCE(SUM(impressions_dedup), 0)::bigint    AS impressions
+    FROM marts.kpis_query_diario
+    WHERE event_date BETWEEN %(mom_s)s AND %(mom_e)s
+    GROUP BY query
 ),
 per_q_yoy AS (
-    SELECT q.query,
-        COALESCE(SUM(c.clicks), 0)::bigint AS clicks,
-        COALESCE(SUM(i.impressions), 0)::bigint AS impressions
-    FROM (SELECT DISTINCT query FROM per_q) q
-    LEFT JOIN (
-        SELECT query, SUM(clicks) AS clicks
-        FROM extraccion_gsc
-        WHERE date BETWEEN %(yoy_s)s AND %(yoy_e)s
-        GROUP BY query
-    ) c ON c.query = q.query
-    LEFT JOIN (
-        SELECT query, SUM(max_imp) AS impressions FROM (
-            SELECT query, date, MAX(impressions) AS max_imp
-            FROM extraccion_gsc
-            WHERE date BETWEEN %(yoy_s)s AND %(yoy_e)s
-            GROUP BY query, date
-        ) t GROUP BY query
-    ) i ON i.query = q.query
-    GROUP BY q.query
+    SELECT
+        query,
+        COALESCE(SUM(clicks), 0)::bigint               AS clicks,
+        COALESCE(SUM(impressions_dedup), 0)::bigint    AS impressions
+    FROM marts.kpis_query_diario
+    WHERE event_date BETWEEN %(yoy_s)s AND %(yoy_e)s
+    GROUP BY query
 )
 SELECT
     pq.query, tu.page, cq.clicks, pq.impressions, pq.position,
     CASE WHEN pq.impressions > 0 THEN cq.clicks::float / pq.impressions ELSE 0 END AS ctr,
-    m.clicks AS mom_clicks, m.impressions AS mom_impressions,
-    y.clicks AS yoy_clicks, y.impressions AS yoy_impressions
+    COALESCE(m.clicks, 0)::bigint      AS mom_clicks,
+    COALESCE(m.impressions, 0)::bigint AS mom_impressions,
+    COALESCE(y.clicks, 0)::bigint      AS yoy_clicks,
+    COALESCE(y.impressions, 0)::bigint AS yoy_impressions
 FROM per_q pq
 JOIN clicks_q cq  USING (query)
 JOIN top_url tu   USING (query)
@@ -284,25 +264,30 @@ def compute_opportunities(from_: dt.date, to_: dt.date, limit: int = 50, min_imp
 # =====================================================================
 # 3) CANNIBALIZATION: queries con >1 URL donde TODAS son producto
 # =====================================================================
+#
+# Lee de:
+#   - marts.canib_query_page_daily : VIEW grano (query, page, date) con is_product
+#   - marts.kpis_query_diario      : usamos impressions_dedup pre-calculada
+#                                    en lugar de re-calcular MAX(impressions) GROUP BY query, date
 
 _CANNIBALIZATION_SQL = """
 WITH q_pages AS (
     SELECT
         query,
         page,
-        prod_bool,
+        is_product,
         SUM(clicks)::bigint                                         AS clicks,
         SUM(impressions)::bigint                                    AS impressions,
         SUM(position*impressions)/NULLIF(SUM(impressions),0)        AS position
-    FROM extraccion_gsc
-    WHERE date BETWEEN %(cur_s)s AND %(cur_e)s
-    GROUP BY query, page, prod_bool
+    FROM marts.canib_query_page_daily
+    WHERE event_date BETWEEN %(cur_s)s AND %(cur_e)s
+    GROUP BY query, page, is_product
 ),
 q_summary AS (
     SELECT
         query,
         COUNT(DISTINCT page)                                         AS total_urls,
-        COUNT(DISTINCT page) FILTER (WHERE prod_bool = true)         AS product_urls,
+        COUNT(DISTINCT page) FILTER (WHERE is_product = true)        AS product_urls,
         SUM(clicks)::bigint                                          AS clicks
     FROM q_pages
     GROUP BY query
@@ -316,15 +301,11 @@ canib AS (
     ORDER BY clicks DESC
     LIMIT %(limit)s
 ),
--- impresiones DEDUP por query
+-- impresiones DEDUP por query: usamos el mart que ya tiene impressions_dedup pre-calculada
 imp_q AS (
-    SELECT query, SUM(max_imp)::bigint AS impressions
-    FROM (
-        SELECT query, date, MAX(impressions) AS max_imp
-        FROM extraccion_gsc
-        WHERE date BETWEEN %(cur_s)s AND %(cur_e)s
-        GROUP BY query, date
-    ) t
+    SELECT query, SUM(impressions_dedup)::bigint AS impressions
+    FROM marts.kpis_query_diario
+    WHERE event_date BETWEEN %(cur_s)s AND %(cur_e)s
     GROUP BY query
 ),
 -- Detalle de URLs por query canibalizante (JSON)

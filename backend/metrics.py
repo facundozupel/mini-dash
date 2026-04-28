@@ -1,8 +1,8 @@
 """
 Logica compartida por los 4 endpoints /metrics/*:
 - Calcula rangos (current, mom=periodo previo, yoy=mismo periodo un anio atras)
-- Define los filtros WHERE por tipo de pagina
-- Corre los SQL de KPIs y trend
+- Define los filtros validos
+- Corre los SQL de KPIs y trend contra marts.kpis_diario (filter como columna)
 """
 import datetime as dt
 from dataclasses import dataclass
@@ -12,14 +12,9 @@ from psycopg.rows import dict_row
 from bucket_cache import BucketCache
 from db.conn import pool
 
-# --- Filtros por tipo de pagina (hardcoded, no user input = safe) ---
-FILTERS: dict[str, str] = {
-    "overall":   "TRUE",
-    "products":  "prod_bool = true",
-    "category":  "prod_bool = false AND blog = false "
-                 "AND page NOT IN ('https://www.endado.com/', 'http://www.endado.com/')",
-    "recambios": "page ILIKE '%%/recambios/%%'",
-}
+# Filtros validos. Las definiciones SQL viven en marts.kpis_diario (columna `filter`)
+# pre-explotada por dbt. Aca solo validamos que el nombre exista.
+FILTERS: frozenset[str] = frozenset({"overall", "products", "category", "recambios"})
 
 
 @dataclass
@@ -43,34 +38,30 @@ def compute_ranges(from_: dt.date, to_: dt.date) -> tuple[Range, Range, Range]:
     )
 
 
-# --- SQL templates (el {filter} se reemplaza desde FILTERS) ---
-
-# KPIs por dia para el bucket cache (L2). Devuelve componentes crudos:
-#   clicks         -> aditivo
-#   impressions    -> aditivo (= denominador de pos avg, page-level no dedupa)
-#   pos_num        -> SUM(position * impressions), aditivo
-# Para componer un rango: ctr = sum(clicks)/sum(imp); pos = sum(pos_num)/sum(imp).
+# KPIs por dia desde marts.kpis_diario.
+# Cada fila ya es 1 dia x 1 filter pre-agregado: sin GROUP BY, sin SUM, sin COALESCE.
 _KPIS_BUCKET_SQL = """
 SELECT
-    date,
-    COALESCE(SUM(clicks), 0)::bigint                            AS clicks,
-    COALESCE(SUM(impressions), 0)::bigint                       AS impressions,
-    COALESCE(SUM(position * impressions), 0)::float             AS pos_num
-FROM extraccion_gsc_page
-WHERE date = ANY(%(days)s)
-  AND ({filter})
-GROUP BY date
+    event_date              AS date,
+    clicks::bigint          AS clicks,
+    impressions::bigint     AS impressions,
+    pos_num::float          AS pos_num
+FROM marts.kpis_diario
+WHERE event_date = ANY(%(days)s)
+  AND filter = %(filter)s
 """
 
+# Trend: SUM por DATE_TRUNC para granularidad week/month. Para day, el SUM es no-op
+# (1 fila por dia ya). Mantenemos la query unificada por simplicidad.
 _TREND_SQL = """
 SELECT
-    DATE_TRUNC(%(gran)s, date)::date          AS date,
-    COALESCE(SUM(clicks), 0)::bigint          AS clicks,
-    COALESCE(SUM(impressions), 0)::bigint     AS impressions
-FROM extraccion_gsc_page
-WHERE date BETWEEN %(start)s AND %(end)s
-  AND ({filter})
-GROUP BY DATE_TRUNC(%(gran)s, date)
+    DATE_TRUNC(%(gran)s, event_date)::date    AS date,
+    SUM(clicks)::bigint                       AS clicks,
+    SUM(impressions)::bigint                  AS impressions
+FROM marts.kpis_diario
+WHERE event_date BETWEEN %(start)s AND %(end)s
+  AND filter = %(filter)s
+GROUP BY DATE_TRUNC(%(gran)s, event_date)
 ORDER BY 1
 """
 
@@ -80,13 +71,12 @@ TREND_MONTHS_BACK = 24  # "mapa panoramico" fijo
 
 
 def _fetch_kpi_days(filter_name: str, days: list[dt.date]) -> dict[dt.date, dict]:
-    """Trae los componentes crudos para los dias dados, en una sola query."""
+    """Trae los componentes per-dia desde marts.kpis_diario en una sola query."""
     if not days:
         return {}
-    sql = _KPIS_BUCKET_SQL.format(filter=FILTERS[filter_name])
     with pool.connection() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
-            cur.execute(sql, {"days": days})
+            cur.execute(_KPIS_BUCKET_SQL, {"days": days, "filter": filter_name})
             rows = cur.fetchall()
     return {
         r["date"]: {
@@ -131,10 +121,12 @@ def _run_kpis(filter_name: str, rng: Range) -> dict:
 
 
 def _run_trend(filter_name: str, rng: Range, gran: str) -> list[dict]:
-    sql = _TREND_SQL.format(filter=FILTERS[filter_name])
     with pool.connection() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
-            cur.execute(sql, {"start": rng.start, "end": rng.end, "gran": gran})
+            cur.execute(_TREND_SQL, {
+                "start": rng.start, "end": rng.end,
+                "gran": gran, "filter": filter_name,
+            })
             return cur.fetchall()
 
 
@@ -200,9 +192,6 @@ def compute_trend(filter_name: str, gran: str) -> dict:
         raise ValueError(f"granularity debe ser uno de {VALID_GRANULARITIES}")
 
     today = dt.date.today()
-    # ~24 meses = 730 dias. Uso relativedelta-esque: subtract 24 months from today.
-    start = (today.replace(day=1) - dt.timedelta(days=1)).replace(day=1)
-    # Simple: 730 dias atras (aprox 24 meses)
     start = today - dt.timedelta(days=730)
     rng = Range("trend", start, today)
     rows = _run_trend(filter_name, rng, gran)

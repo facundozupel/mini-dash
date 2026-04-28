@@ -5,7 +5,10 @@ Dashboard CRO mini que consume la DB existente de **endado.com** (read-only) y r
 ## Stack
 
 - **Backend:** FastAPI + psycopg3 + pydantic-settings + cachetools (TTL 24h in-process)
-- **DB:** Postgres 14 en VPS (5.161.212.136), DB `endado` (no la modificamos, solo lectura)
+- **DB:** Postgres 14 en VPS (5.161.212.136), DB `endado`. Las tablas raw (`public.*`) son read-only para nosotros. Schemas propios:
+  - `staging.*` — limpieza/normalizacion de raw (TABLE incremental dbt)
+  - `marts.*` — agregaciones daily-grain pre-explotadas por filter (TABLE/MV/VIEW dbt)
+- **Modelado de datos:** dbt-core 1.11 + dbt-postgres en VPS endado, refresh diario 03:00 via cron + Healthchecks.io. Ver "Arquitectura de schemas (dbt)" abajo.
 - **Frontend:** HTML + CSS + JS vanilla + Chart.js CDN (servido por la misma FastAPI desde `/`)
 - **Deploy futuro:** Render Static (front) + VPS Docker Swarm/Traefik (API) en `minidash.facundo.click`
 
@@ -18,14 +21,25 @@ MICRO-DASH/
 │   ├── settings.py     ← .env via pydantic-settings
 │   ├── cache.py        ← CacheStore (Protocol) + TTL/Dict adapters + @snapshot decorator (L1) + warm() + STATS
 │   ├── bucket_cache.py ← BucketCache (L2): cachea componentes per-day y compone rangos
-│   ├── metrics.py      ← KPIs (current/MoM/YoY) + trend 24m + FILTERS dict (usa bucket cache)
-│   ├── tables.py       ← top_pages / opportunities / cannibalization
+│   ├── metrics.py      ← KPIs current/MoM/YoY + trend 24m, lee marts.kpis_diario via bucket cache
+│   ├── tables.py       ← top_pages / opportunities / cannibalization, leen marts.*
 │   ├── db/conn.py      ← psycopg3 pool
-│   ├── queries/        ← (vacio por ahora; SQL inline en metrics.py/tables.py)
 │   ├── pyproject.toml
 │   ├── Dockerfile      ← (para deploy)
 │   ├── .env.example
 │   └── .env            ← NUNCA al repo
+├── dbt/                ← proyecto dbt-core (modela raw -> staging -> marts)
+│   ├── dbt_project.yml
+│   ├── packages.yml         ← dbt_utils
+│   ├── profiles.yml.example ← copiar a ~/.dbt/profiles.yml en el VPS (con creds reales)
+│   ├── refresh.sh           ← script que corre el cron 03:00 + ping a Healthchecks.io
+│   ├── macros/
+│   │   └── generate_schema_name.sql ← override: usa +schema custom sin concatenar target
+│   ├── models/
+│   │   ├── sources.yml      ← raw declarada (extraccion_gsc, extraccion_gsc_page) + freshness
+│   │   ├── staging/         ← 2 modelos incremental con lookback 7d
+│   │   └── marts/           ← 4 modelos: 1 TABLE + 2 MV + 1 VIEW
+│   └── tests/               ← custom test de equivalencia raw vs marts
 └── frontend/
     ├── index.html      ← Date picker + tabs + KPIs + chart toolbar + tablas
     ├── main.js         ← Estado, fetch, render, recargas segmentadas
@@ -47,19 +61,33 @@ MICRO-DASH/
 | `GET /internal/cache/stats?top_keys=N` (header `x-internal-secret`) | — | — |
 | `POST /internal/cache/stats/clear` (header `x-internal-secret`) | — | — |
 
-`FILTERS` en `metrics.py`:
-- `overall` — `TRUE`
-- `products` — `prod_bool = true`
-- `category` — `prod_bool = false AND blog = false AND page NOT IN ('https://www.endado.com/', 'http://www.endado.com/')`
-- `recambios` — `page ILIKE '%%/recambios/%%'`
+`FILTERS` en `metrics.py` ahora es un `frozenset` con los nombres validos:
+`{"overall", "products", "category", "recambios"}`. Las **definiciones SQL viven en dbt**
+(`models/marts/kpis_diario.sql` y `top_pages_diario.sql`) pre-explotadas como columna
+`filter` en marts. Filtros mutuamente excluyentes:
+
+- `overall` — todas las paginas
+- `products` — `is_product`
+- `category` — `NOT is_product AND NOT is_blog AND NOT is_home AND NOT is_recambio`
+- `recambios` — `is_recambio` (URLs con `/recambios/`)
 
 ## Reglas de SQL (IMPORTANTE)
 
-1. **Impresiones globales (page-level):** `SUM(impressions)` directo sobre `extraccion_gsc_page`.
-2. **Impresiones por query:** dedup con `MAX(impressions) GROUP BY query, date` y luego `SUM`. La tabla `extraccion_gsc` duplica impresiones entre URLs de una misma query.
+Las reglas que antes habia que respetar en CADA query del backend ahora estan
+**pre-aplicadas en marts** por dbt. Quedan como referencia para entender por que el
+modelo es asi, no como reglas a aplicar al escribir queries nuevas.
+
+1. **Impresiones globales (page-level):** `SUM(impressions)` directo. Aplicado en
+   `marts.kpis_diario` y `marts.top_pages_diario`.
+2. **Impresiones por query:** dedup `MAX(impressions) GROUP BY query, date`. La tabla
+   `extraccion_gsc` duplica impresiones entre URLs de una misma query. Pre-calculado
+   como `impressions_dedup` en `marts.kpis_query_diario`.
 3. **Clicks:** SIEMPRE `SUM` directo (no se duplican).
-4. **Posicion promedio:** ponderada por impresiones → `SUM(position*impressions)/SUM(impressions)`. Sin esto queda sesgada.
-5. **`%` literal en SQL templates:** escapar como `%%` cuando va por psycopg con params (`%s`/`%(name)s`). Ejemplo: `page ILIKE '%%/recambios/%%'`.
+4. **Posicion promedio:** ponderada por impresiones → `SUM(pos_num)/SUM(impressions)`.
+   `pos_num = position * impressions` se pre-calcula en staging.
+5. **Filter como bind param**, no template SQL. Ejemplo:
+   `WHERE event_date = ANY(%(days)s) AND filter = %(filter)s`. Ya no se usa
+   `sql.format(filter=...)`.
 
 ## Comparativas MoM/YoY
 
@@ -259,15 +287,82 @@ def test_cache_hits():
 
 Sin Postgres, sin FastAPI, milisegundos.
 
+## Arquitectura de schemas (dbt)
+
+Pipeline `raw -> staging -> marts` orquestado por dbt-core en VPS endado, refresh
+diario 03:00 via cron + Healthchecks.io.
+
+### staging.* (limpieza, TABLE incremental con lookback 7d)
+
+| Tabla | Grano | Filas | Sirve a |
+|---|---|---|---|
+| `staging.endado_gsc_page_daily`       | (page, event_date)        | 2.7M  | base page-level, alimenta marts.kpis_diario y marts.top_pages_diario |
+| `staging.endado_gsc_query_page_daily` | (query, page, event_date) | 18M   | base query-level, alimenta marts.kpis_query_diario y marts.canib_query_page_daily |
+
+Las staging tienen **flags pre-calculados** (`is_product`, `is_blog`, `is_brand`,
+`is_recambio`, `is_home`) y **`pos_num = position * impressions`** listo para componer
+posicion ponderada.
+
+Lookback 7d: `WHERE date > MAX(event_date) - 7d`. Captura ajustes tardios de GSC
+(que reescribe datos hasta una semana atras).
+
+### marts.* (agregaciones daily-grain)
+
+| Mart | Tipo | Grano | Sirve a |
+|---|---|---|---|
+| `marts.kpis_diario`             | TABLE | (filter, event_date)        | `/metrics/*`, `/trend/*` (filter pre-explotado, ~2.5k filas) |
+| `marts.top_pages_diario`        | MV    | (filter, page, event_date)  | `/tables/top-products`, `/tables/top-categories` (~10M filas, MV con CONCURRENTLY) |
+| `marts.kpis_query_diario`       | MV    | (query, event_date)         | `/tables/opportunities` (impressions_dedup pre-calculada) |
+| `marts.canib_query_page_daily`  | VIEW  | (query, page, event_date)   | `/tables/cannibalization` + top_url para opportunities (proyeccion liviana de staging) |
+
+### Refresh strategy
+
+Cron diario 03:00 en VPS endado: `0 3 * * * /opt/MICRO-DASH/dbt/refresh.sh`.
+
+El script:
+1. Ping `/start` a Healthchecks.io.
+2. `dbt run` (incremental para staging, full para marts).
+3. Si OK → ping `/` con cola del log; si falla → ping `/fail`.
+4. Healthchecks alerta por mail si no llega ping en 25h (1d schedule + 1h grace).
+
+Logs: `/var/log/dbt-minidash/run-YYYY-MM-DD-HHMM.log`.
+
+### Healthchecks.io
+
+- Account: `facundozupel29@gmail.com`
+- Check: `facundo` (UUID `3575e2ee-5d61-4dd6-be49-3e30f5e1dc6f`)
+- Free tier (1 check de 20 disponibles, sin tarjeta).
+
+### Comandos dbt utiles (en el VPS)
+
+```bash
+cd /opt/MICRO-DASH/dbt
+/opt/MICRO-DASH/.venv-dbt/bin/dbt parse        # valida YAML/Jinja
+/opt/MICRO-DASH/.venv-dbt/bin/dbt debug        # valida conexion a Postgres
+/opt/MICRO-DASH/.venv-dbt/bin/dbt run          # corre todo (incremental + full)
+/opt/MICRO-DASH/.venv-dbt/bin/dbt run --select +marts.kpis_diario  # solo este mart + sus deps
+/opt/MICRO-DASH/.venv-dbt/bin/dbt test         # corre los 33 tests
+/opt/MICRO-DASH/.venv-dbt/bin/dbt seed         # n/a, no usamos seeds
+```
+
+### Como agregar un mart nuevo
+
+1. Escribi `dbt/models/marts/nuevo_mart.sql` con el SQL + `{{ config(materialized=...) }}`.
+   Referencia staging con `{{ ref('endado_gsc_X_daily') }}`.
+2. Agregalo a `dbt/models/marts/schema.yml` con tests `unique_combination_of_columns` y `not_null`.
+3. rsync + correr `dbt run --select nuevo_mart`. Verifica con `dbt test --select nuevo_mart`.
+4. Backend: agregar el SQL/funcion en `metrics.py` o `tables.py` que lee del nuevo mart.
+5. Endpoint en `api.py` con `@snapshot` (ver "Como agregar un endpoint cacheado nuevo").
+
 ## DB notes
 
-- **Indices que CREAMOS** en la DB endado (CONCURRENTLY desde dentro del VPS):
-  - `idx_gscpage_date ON extraccion_gsc_page(date)` (~18 MB)
-  - `idx_gsc_date ON extraccion_gsc(date)` (~121 MB)
-  - Sin estos, opportunities/cannibalization timeout (>60s).
-- **No modificar nada mas** en la DB endado sin confirmacion explicita del usuario.
+- **Indices CREADOS por nosotros** en la DB endado:
+  - `public`: indices base (creados manualmente al inicio del proyecto)
+  - `staging.*` y `marts.*`: indices declarados en cada modelo dbt via `+indexes` config
+- **No modificar nada manual** en `public.*` (raw) ni en MVs creadas por dbt: si necesitas cambiar
+  staging/marts, edita el SQL en `dbt/models/` y `dbt run --select <modelo>`.
 - Connect: `host=5.161.212.136 port=5432 dbname=endado user=postgres password=Crossfit29`
-  - Para operaciones largas (CREATE INDEX, ANALYZE), correr DESDE el VPS via SSH+docker exec, no desde la Mac (la conexion se cae a los ~18 min).
+- Para operaciones largas, correr DESDE el VPS via SSH+docker exec, no desde la Mac (conexion se cae a los ~18 min).
 
 ## Comandos comunes
 
@@ -288,12 +383,20 @@ sshpass -p 'KWJuVnufxNLxLcWtqHxL' ssh -o StrictHostKeyChecking=no root@5.161.212
 
 # psql contra endado en VPS
 docker exec -i $(docker ps -q -f name=postgres_postgres) psql -U postgres -d endado
+
+# Sync cambios de dbt (Mac -> VPS)
+sshpass -p 'KWJuVnufxNLxLcWtqHxL' rsync -avz --delete -e "ssh -o StrictHostKeyChecking=no" \
+  dbt/ root@5.161.212.136:/opt/MICRO-DASH/dbt/
+
+# Correr dbt manualmente en el VPS (fuera del cron)
+sshpass -p 'KWJuVnufxNLxLcWtqHxL' ssh -o StrictHostKeyChecking=no root@5.161.212.136 \
+  'cd /opt/MICRO-DASH/dbt && /opt/MICRO-DASH/.venv-dbt/bin/dbt run'
 ```
 
 ## Convenciones
 
 - Respuestas al usuario: **paso a paso, Feynman, poco verboso**. Una accion por turno cuando es grande, confirmar antes de pasos siguientes.
-- SQL templates con `{filter}` placeholder usan `.format()`. Filtros vienen del dict hardcoded `FILTERS` (no user input → safe).
+- **Filter como bind param**, no `.format()`. Los marts ya tienen filter como columna pre-explotada por dbt; los SQL usan `WHERE filter = %(filter)s` con bind seguro.
 - Dates en respuestas API: ISO `YYYY-MM-DD` strings. Backend acepta `from`/`to` como `date` y los pasa a psycopg como objetos.
 - Cache miss vs hit: cada response incluye `{"cache": "hit"|"miss", "data": {...}}` para debug.
 - **No escribir cache keys a mano.** Usar `@snapshot(name)` y `warm(name, args_list)`. Si haces `get_or_compute(f"foo:{x}")` en un caller nuevo, estas reintroduciendo el bug que el refactor mato (drift entre lugares que construyen la misma key).
@@ -307,10 +410,13 @@ docker exec -i $(docker ps -q -f name=postgres_postgres) psql -U postgres -d end
 - `/trend/*` panoramico 24 meses, 3 granularidades
 - Cache TTL + prewarm + invalidacion manual
 - Cache "deepada": `@snapshot` decorator (L1) + `CacheStore` Protocol (testeable sin DB)
-- **Bucket cache (L2)** para `compute_metrics`: componentes per-day reusables entre rangos solapados (88/90 hits movienso el picker 1 dia)
+- **Bucket cache (L2)** para `compute_metrics`: componentes per-day reusables entre rangos solapados
 - Stats hit/miss per-key (`/internal/cache/stats`) para medir antes de optimizar
 - Frontend con date picker, tabs, granularity, loading UX
-- Indices en DB endado
+- **Pipeline raw → staging → marts modelado en dbt** (2 staging incremental + 4 marts daily-grain)
+- **Backend lee de marts.*** (filter como bind param, dedup MAX pre-calculada en mart)
+- **Cron diario 03:00** en VPS endado + alertas Healthchecks.io free
+- 33 tests dbt (unique, not_null, accepted_values, freshness, equivalencia raw vs marts)
 
 ⏳ Pendiente:
 - Auth (Google Sign-In + JWT + whitelist) — `GOOGLE_CLIENT_ID` y `JWT_SECRET` ya estan en `.env.example`
