@@ -1,0 +1,18 @@
+# Copia este archivo a ~/.dbt/profiles.yml en el VPS donde corre dbt.
+# NO commitear el profiles.yml real (tiene password).
+
+minidash:
+  target: prod
+  outputs:
+    prod:
+      type: postgres
+      host: localhost           # Si dbt corre en el host del VPS y Postgres expone 5432
+      # host: postgres_postgres # Si dbt corre dentro de la red docker
+      port: 5432
+      user: postgres
+      password: CAMBIAR_AQUI
+      dbname: endado
+      schema: staging           # Default schema (los modelos lo overridean con +schema)
+      threads: 4
+      keepalives_idle: 0
+      connect_timeout: 10
