@@ -3,8 +3,13 @@
 //  Consume /metrics/{filter} + /tables/*
 // ============================================================
 
-// Mismo origen: el front se sirve desde FastAPI, sin CORS
-const API_BASE = window.location.origin;
+// Local (FastAPI sirve front + back) -> mismo origen.
+// Prod (Render Static) -> API en VPS.
+const API_BASE = (() => {
+  const host = window.location.hostname;
+  if (host === "localhost" || host === "127.0.0.1") return window.location.origin;
+  return "https://api-minidash.facundo.click";
+})();
 
 const state = {
   from: null,   // YYYY-MM-DD

@@ -1,0 +1,53 @@
+# MiniDash Endado — Docker Swarm stack para VPS de laburo
+#
+# Asunciones (ajustar si tu setup es distinto):
+#   - Red de Traefik externa:   `traefik-public`
+#   - Cert resolver de Traefik: `letsencrypt`
+#   - Postgres corre en Swarm con stack `postgres`, servicio `postgres`
+#     (DB_HOST=postgres_postgres). Necesita compartir red con la api;
+#     ajustar `external_postgres_net` al nombre real de la red de postgres.
+#
+# Build local en el VPS (ver deploy/DEPLOY.md). Imagen: mini-dash-api:latest
+
+services:
+  api:
+    image: mini-dash-api:latest
+    env_file:
+      - .env
+    networks:
+      - traefik-public
+      - postgres
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+      update_config:
+        order: start-first
+        failure_action: rollback
+      labels:
+        - "traefik.enable=true"
+        - "traefik.docker.network=traefik-public"
+        - "traefik.http.routers.minidash-api.rule=Host(`api-minidash.facundo.click`)"
+        - "traefik.http.routers.minidash-api.entrypoints=websecure"
+        - "traefik.http.routers.minidash-api.tls=true"
+        - "traefik.http.routers.minidash-api.tls.certresolver=letsencrypt"
+        - "traefik.http.services.minidash-api.loadbalancer.server.port=8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health',timeout=3).status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+networks:
+  traefik-public:
+    external: true
+  postgres:
+    external: true
+    # Si la red de postgres se llama distinto (ej: `postgres_default`),
+    # cambiar el bloque por:
+    # postgres:
+    #   external: true
+    #   name: postgres_default
