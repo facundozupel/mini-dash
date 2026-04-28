@@ -122,6 +122,11 @@ ssh <user>@master.facundo.click '
 `update_config: order: start-first` en el stack hace zero-downtime: levanta el nuevo
 container, espera healthcheck, despues mata el viejo.
 
+> **Gotcha**: con imagen local (sin registry) NO uses `docker stack deploy` para
+> updates — Swarm pinnea por digest del primer deploy y no detecta cambios en `:latest`
+> aunque rebuild. Usar `docker service update --image ... --force` siempre. `stack deploy`
+> solo para cambios al `docker-stack.yml` (labels, networks, replicas, env vars).
+
 ## Troubleshooting
 
 | Sintoma | Causa probable | Fix |

@@ -97,7 +97,10 @@ app = FastAPI(title="MiniDash Endado", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[settings.frontend_origin] if settings.frontend_origin != "*" else ["*"],
+    allow_origins=(
+        ["*"] if settings.frontend_origin == "*"
+        else [o.strip() for o in settings.frontend_origin.split(",") if o.strip()]
+    ),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -204,4 +207,8 @@ def internal_stats_clear(x_internal_secret: str = Header(default="")):
 
 
 # Frontend estatico (tiene que ir ULTIMO para no pisar /metrics, /health, etc.)
-app.mount("/", StaticFiles(directory="../frontend", html=True), name="frontend")
+# Solo se monta en dev (el front vive afuera con la imagen Docker -> Render).
+import os
+_frontend_dir = "../frontend"
+if os.path.isdir(_frontend_dir):
+    app.mount("/", StaticFiles(directory=_frontend_dir, html=True), name="frontend")
