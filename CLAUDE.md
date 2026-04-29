@@ -38,7 +38,7 @@ MICRO-DASH/
 │   ├── models/
 │   │   ├── sources.yml      ← raw declarada (extraccion_gsc, extraccion_gsc_page) + freshness
 │   │   ├── staging/         ← 2 modelos incremental con lookback 7d
-│   │   └── marts/           ← 4 modelos: 1 TABLE + 2 MV + 1 VIEW
+│   │   └── marts/           ← 4 modelos: 1 TABLE + 3 MV (canib promovido)
 │   └── tests/               ← custom test de equivalencia raw vs marts
 └── frontend/
     ├── index.html      ← Date picker + tabs + KPIs + chart toolbar + tablas
@@ -58,6 +58,7 @@ MICRO-DASH/
 | `GET /tables/cannibalization?from=&to=&limit=50` | date picker | igual |
 | `GET /health` | — | — |
 | `POST /internal/cache/flush` (header `x-internal-secret`) | — | — |
+| `POST /internal/cache/prewarm` (header `x-internal-secret`) | — | re-corre `_prewarm()` con `today()` actual. Lo llama el cron de dbt 03:00 para que el cache rote con el dia. |
 | `GET /internal/cache/stats?top_keys=N` (header `x-internal-secret`) | — | — |
 | `POST /internal/cache/stats/clear` (header `x-internal-secret`) | — | — |
 
@@ -313,7 +314,7 @@ Lookback 7d: `WHERE date > MAX(event_date) - 7d`. Captura ajustes tardios de GSC
 | `marts.kpis_diario`             | TABLE | (filter, event_date)        | `/metrics/*`, `/trend/*` (filter pre-explotado, ~2.5k filas) |
 | `marts.top_pages_diario`        | MV    | (filter, page, event_date)  | `/tables/top-products`, `/tables/top-categories` (~10M filas, MV con CONCURRENTLY) |
 | `marts.kpis_query_diario`       | MV    | (query, event_date)         | `/tables/opportunities` (impressions_dedup pre-calculada) |
-| `marts.canib_query_page_daily`  | VIEW  | (query, page, event_date)   | `/tables/cannibalization` + top_url para opportunities (proyeccion liviana de staging) |
+| `marts.canib_query_page_daily`  | MV    | (query, page, event_date)   | `/tables/cannibalization` + top_url para opportunities. Era VIEW pero el seq scan a staging mataba la perf — promovido a MV con BRIN(event_date)+btree(query). |
 
 ### Refresh strategy
 
@@ -364,6 +365,104 @@ cd /opt/MICRO-DASH/dbt
 - Connect: `host=5.161.212.136 port=5432 dbname=endado user=postgres password=Crossfit29`
 - Para operaciones largas, correr DESDE el VPS via SSH+docker exec, no desde la Mac (conexion se cae a los ~18 min).
 
+## Performance: BRIN + ANALYZE + work_mem
+
+Aprendizajes del tuning de queries con rangos amplios sobre marts de 10M+ filas.
+Si una tabla nueva tarda >1s en frio, revisar estas 3 cosas en orden:
+
+### 1. BRIN > btree para `event_date`
+
+btree(event_date) **lo descarta el planner** cuando el rango devuelve >1% de la
+tabla (caso tipico: 30d sobre 2 años = 4%). Postgres elige seq scan a 18M filas → 8s+.
+
+BRIN ocupa **96 KB para indexar 3 GB** y gana lejos cuando los rows estan ordenados
+fisicamente. Como las staging son `incremental` y appendean por fecha, ya estan
+ordenadas. Para una MV nueva, agregar `ORDER BY event_date` al final del SELECT
+para que el storage clusteree.
+
+Aplicado en:
+- `staging.endado_gsc_query_page_daily` y `staging.endado_gsc_page_daily` (BRIN reemplazando btree)
+- `marts.canib_query_page_daily` (la MV nueva)
+
+### 2. ANALYZE despues de cada `dbt run`
+
+dbt **NO** corre ANALYZE automatico. Stats viejas → planner elige seq scan aunque
+exista BRIN. Smoking gun: misma query pasa de 10s → 200ms con un solo `ANALYZE`.
+
+Por eso `dbt/refresh.sh` corre ANALYZE de los 6 modelos clave despues del refresh
+diario. Si agregas un mart nuevo, sumalo al bloque ANALYZE del script.
+
+### 3. `work_mem` por sesion
+
+El default 4MB es bajisimo para sorts/groupbys >50k filas. EXPLAIN muestra
+`Sort Method: external merge Disk: 32MB` = sort a tempfiles = 5-10x mas lento.
+
+Solucion: `cur.execute("SET LOCAL work_mem = '256MB'")` al inicio de cada query
+pesada. Ya aplicado en `compute_top_pages`, `compute_opportunities`,
+`compute_cannibalization`. Es por-sesion, no afecta otros workers.
+
+### Como diagnosticar de nuevo
+
+```bash
+# EXPLAIN con buffers + timing
+docker exec -i $(docker ps -q -f name=postgres_postgres) psql -U postgres -d endado -c "
+EXPLAIN (ANALYZE, BUFFERS, SUMMARY)
+SELECT ... ;
+"
+```
+
+Buscar:
+- "Seq Scan" sobre tabla grande → revisar indices + correr ANALYZE.
+- "Sort Method: external merge Disk" → subir work_mem.
+- "loops=N" alto en CTE Scan → CTE materializado escaneado N veces; mergear.
+- "Heap Fetches" alto en Index Only Scan → falta VACUUM.
+
+## Deploy productivo
+
+```
+[ usuario ]
+   ├── https://minidash.facundo.click       → Render Static (frontend/)
+   │       (custom domain opcional; default mini-dash.onrender.com)
+   └── https://api-minidash.facundo.click   → VPS personal master.facundo.click
+           (CNAME → master.facundo.click, DNS only en Cloudflare)
+                  └── Traefik (network_public, resolver letsencryptresolver)
+                         → mini-dash_api (Swarm) :8000
+                                → postgres_postgres (mismo VPS, misma red)
+```
+
+Runbook completo: [`deploy/DEPLOY.md`](./deploy/DEPLOY.md).
+
+### Update de codigo (zero-downtime)
+
+```bash
+# 1. Local
+git push
+
+# 2. VPS: pull, rebuild, force-update del servicio
+sshpass -p 'KWJuVnufxNLxLcWtqHxL' ssh root@5.161.212.136 '
+  cd /opt/mini-dash && git pull &&
+  cd backend && docker build -q -t mini-dash-api:latest . &&
+  docker service update --image mini-dash-api:latest --force mini-dash_api
+'
+```
+
+> **Gotcha**: con imagen local (sin registry) `docker stack deploy` NO actualiza
+> el servicio aunque rebuild. Swarm pinnea por digest del primer deploy. Hay que
+> usar `docker service update --force`. `stack deploy` solo para cambios al
+> `docker-stack.yml` (labels, networks, replicas, env vars).
+
+### Sync de archivos (alternativa al git pull)
+
+`rsync` desde Mac al VPS para iterar rapido sin commit:
+
+```bash
+sshpass -p 'KWJuVnufxNLxLcWtqHxL' rsync -az -e "ssh -o StrictHostKeyChecking=no" \
+  backend/api.py root@5.161.212.136:/opt/mini-dash/backend/api.py
+```
+
+Para dbt: tambien hay que sync a `/opt/MICRO-DASH/dbt` (path historico que usa
+el cron). El refresh.sh esta duplicado en ambos paths para evitar sorpresas.
+
 ## Comandos comunes
 
 ```bash
@@ -408,21 +507,22 @@ sshpass -p 'KWJuVnufxNLxLcWtqHxL' ssh -o StrictHostKeyChecking=no root@5.161.212
 - 4 endpoints `/metrics/*` con MoM/YoY
 - 4 endpoints `/tables/*` con comparativas
 - `/trend/*` panoramico 24 meses, 3 granularidades
-- Cache TTL + prewarm + invalidacion manual
+- Cache TTL + prewarm + invalidacion manual + endpoint `/internal/cache/prewarm` para rotacion diaria
 - Cache "deepada": `@snapshot` decorator (L1) + `CacheStore` Protocol (testeable sin DB)
 - **Bucket cache (L2)** para `compute_metrics`: componentes per-day reusables entre rangos solapados
 - Stats hit/miss per-key (`/internal/cache/stats`) para medir antes de optimizar
 - Frontend con date picker, tabs, granularity, loading UX
-- **Pipeline raw → staging → marts modelado en dbt** (2 staging incremental + 4 marts daily-grain)
+- **Pipeline raw → staging → marts modelado en dbt** (2 staging incremental + 4 marts daily-grain, canib promovido a MV)
 - **Backend lee de marts.*** (filter como bind param, dedup MAX pre-calculada en mart)
-- **Cron diario 03:00** en VPS endado + alertas Healthchecks.io free
+- **Cron diario 03:00** en VPS personal: dbt run + ANALYZE de los 6 modelos + prewarm + Healthchecks.io
 - 33 tests dbt (unique, not_null, accepted_values, freshness, equivalencia raw vs marts)
+- **Perf tuning**: BRIN(event_date), `work_mem='256MB'` por sesion en queries pesadas, CTEs duplicados mergeados. Default range pasa de 28-60s a 0.5-0.7s.
+- **Deploy productivo**: front en Render (`minidash.onrender.com`/custom domain), back en VPS Swarm/Traefik (`api-minidash.facundo.click`), TLS Let's Encrypt automatico.
 
 ⏳ Pendiente:
 - Auth (Google Sign-In + JWT + whitelist) — `GOOGLE_CLIENT_ID` y `JWT_SECRET` ya estan en `.env.example`
-- Deploy: Dockerizar y subir al VPS con Traefik en `minidash.facundo.click`
-- Frontend separado en Render (configurar CORS bien)
 - Tests unitarios de `cache.py` (ya es posible con `DictCacheStore`, falta escribirlos)
+- Refactor SQL profundo para que **custom date ranges** tambien sean rapidos (hoy: default = 0.5s warm, custom shifted = 8-30s cold). Idea: pre-aggregate canib a query-grain en una nueva MV `marts.canib_query_summary_daily`.
 
 ## Gotchas conocidos
 

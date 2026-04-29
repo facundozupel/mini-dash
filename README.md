@@ -51,7 +51,7 @@ El boot tarda ~60s en estar 100% caliente (prewarm en background). El servidor r
 
 | Endpoint | Que devuelve |
 |---|---|
-| `GET /` | Frontend (HTML) |
+| `GET /` | Frontend (solo en dev local) |
 | `GET /metrics/{overall\|products\|category\|recambios}?from=&to=` | KPIs + MoM + YoY |
 | `GET /trend/{filter}?granularity=day\|week\|month` | Trend 24m panoramico |
 | `GET /tables/top-products?from=&to=&limit=20` | Top N productos con comparativas |
@@ -60,6 +60,7 @@ El boot tarda ~60s en estar 100% caliente (prewarm en background). El servidor r
 | `GET /tables/cannibalization?from=&to=&limit=50` | Queries con >1 URL de producto compitiendo |
 | `GET /health` | Healthcheck (DB connectivity) |
 | `POST /internal/cache/flush` | Limpia cache (header `x-internal-secret`) |
+| `POST /internal/cache/prewarm` | Recorre prewarm con today() actual (header `x-internal-secret`). Lo llama cron post-dbt. |
 | `GET /internal/cache/stats` | Hit/miss per-key (header `x-internal-secret`) |
 | `POST /internal/cache/stats/clear` | Reset contadores (header `x-internal-secret`) |
 
@@ -67,25 +68,32 @@ El boot tarda ~60s en estar 100% caliente (prewarm en background). El servidor r
 
 ```
 MICRO-DASH/
-├── backend/    ← FastAPI + SQL + cache
-├── frontend/   ← HTML + JS + CSS
-├── CLAUDE.md   ← guia tecnica para iterar con Claude
-└── README.md   ← este archivo
+├── backend/      ← FastAPI + SQL + cache + Dockerfile
+├── frontend/     ← HTML + JS + CSS (deploy a Render)
+├── dbt/          ← raw -> staging -> marts + refresh.sh (cron)
+├── deploy/       ← docker-stack.yml + .env productivo + DEPLOY.md (runbook)
+├── CLAUDE.md     ← guia tecnica para iterar con Claude
+└── README.md     ← este archivo
 ```
 
-## Deploy (futuro)
+## Deploy (productivo)
 
-- Frontend → Render Static
-- API + cache → VPS Docker Swarm + Traefik en `minidash.facundo.click`
-- DB endado → ya esta en el VPS, no se toca
+- **Frontend** → Render Static, dominio `mini-dash.onrender.com` (custom domain `minidash.facundo.click` opcional via CNAME).
+- **Backend** → VPS personal `master.facundo.click` (Docker Swarm + Traefik existentes), dominio `https://api-minidash.facundo.click`. Cert Let's Encrypt automatico.
+- **DB endado** → mismo VPS, no se toca. La api se conecta por DNS interno (`postgres_postgres` en la red `network_public`).
+
+Runbook completo en [`deploy/DEPLOY.md`](./deploy/DEPLOY.md). Incluye gotchas (ej: `docker stack deploy` no actualiza imagenes locales — usar `docker service update --force`).
 
 ## Status
 
 - [x] Local end-to-end con data real
-- [x] Indices creados en DB endado para perf
+- [x] Indices creados en DB endado para perf (BRIN + btree donde corresponde)
 - [x] Cache "deepada": `@snapshot` decorator (L1) + `CacheStore` Protocol (testeable sin DB)
 - [x] Bucket cache (L2) para `/metrics/*` con componentes per-day reusables
 - [x] Stats hit/miss per-key (`/internal/cache/stats`) para decidir optimizaciones con datos
+- [x] Pipeline raw -> staging -> marts modelado en dbt + cron diario 03:00 + ANALYZE post-refresh + Healthchecks.io
+- [x] **Deploy productivo**: front en Render, back en VPS con Swarm/Traefik, TLS automatico
+- [x] Endpoint `/internal/cache/prewarm` enganchado al cron de dbt para que el cache rote con el dia
 - [ ] Tests unitarios
 - [ ] Auth (Google Sign-In + JWT)
-- [ ] Deploy
+- [ ] Refactor SQL profundo: pre-aggregate canib query-grain para que custom date ranges tambien sean rapidos
