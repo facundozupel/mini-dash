@@ -206,6 +206,16 @@ def internal_stats_clear(x_internal_secret: str = Header(default="")):
     return {"cleared_keys": clear_stats()}
 
 
+@app.post("/internal/cache/prewarm")
+async def internal_prewarm(x_internal_secret: str = Header(default="")):
+    """Re-corre prewarm con el today() actual. Pensado para cron post-dbt refresh
+    asi el cache rota junto con el rollover diario y nadie come miss en frio."""
+    if not settings.internal_secret or x_internal_secret != settings.internal_secret:
+        raise HTTPException(status_code=401, detail="bad secret")
+    asyncio.create_task(asyncio.to_thread(_prewarm))
+    return {"status": "started"}
+
+
 # Frontend estatico (tiene que ir ULTIMO para no pisar /metrics, /health, etc.)
 # Solo se monta en dev (el front vive afuera con la imagen Docker -> Render).
 import os

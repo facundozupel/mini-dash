@@ -31,6 +31,17 @@ RC=$?
 if [ $RC -eq 0 ]; then
     # Ping success
     curl -fsS --retry 3 -m 10 --data-raw "OK $(tail -3 ${LOG_FILE})" "${HC_URL}" > /dev/null 2>&1 || true
+
+    # Re-warm cache del API con el today() actualizado. Sin esto, el primer
+    # usuario despues del rollover diario espera 60s mientras se computa.
+    ENV_FILE="/opt/mini-dash/deploy/.env"
+    if [ -f "$ENV_FILE" ]; then
+        SECRET=$(grep '^INTERNAL_SECRET=' "$ENV_FILE" | cut -d= -f2-)
+        curl -fsS --retry 2 -m 30 -X POST \
+            -H "x-internal-secret: ${SECRET}" \
+            https://api-minidash.facundo.click/internal/cache/prewarm \
+            >> "$LOG_FILE" 2>&1 || true
+    fi
 else
     # Ping fail con cola del log
     curl -fsS --retry 3 -m 10 --data-raw "FAIL rc=$RC. Tail log: $(tail -20 ${LOG_FILE})" "${HC_URL}/fail" > /dev/null 2>&1 || true
