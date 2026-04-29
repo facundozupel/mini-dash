@@ -4,7 +4,7 @@
     unique_key=['page', 'event_date'],
     on_schema_change='sync_all_columns',
     indexes=[
-      {'columns': ['event_date'], 'type': 'btree'},
+      {'columns': ['event_date'], 'type': 'brin'},
       {'columns': ['page'], 'type': 'btree'},
     ]
   )

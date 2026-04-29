@@ -20,16 +20,10 @@ from metrics import FILTERS, compute_ranges
 # Filter va como bind param, no como template SQL.
 
 _TOP_PAGES_SQL = """
-WITH top AS (
-    SELECT page, SUM(clicks) AS clicks
-    FROM marts.top_pages_diario
-    WHERE event_date BETWEEN %(cur_s)s AND %(cur_e)s
-      AND filter = %(filter)s
-    GROUP BY page
-    ORDER BY clicks DESC
-    LIMIT %(limit)s
-),
-cur AS (
+WITH cur AS (
+    -- Una sola pasada: agrupa todo, ordena por clicks DESC, top N.
+    -- Antes habia un CTE `top` que sacaba SOLO la lista de pages, y despues
+    -- `cur` re-escaneaba para sacar las metricas. Mismo data, dos pasadas.
     SELECT page,
         MAX(cat) AS cat,
         SUM(clicks)::bigint AS clicks,
@@ -39,9 +33,11 @@ cur AS (
     FROM marts.top_pages_diario
     WHERE event_date BETWEEN %(cur_s)s AND %(cur_e)s
       AND filter = %(filter)s
-      AND page IN (SELECT page FROM top)
     GROUP BY page
+    ORDER BY SUM(clicks) DESC
+    LIMIT %(limit)s
 ),
+top AS (SELECT page FROM cur),
 mom AS (
     SELECT page,
         SUM(clicks)::bigint AS clicks,
@@ -92,6 +88,10 @@ def compute_top_pages(filter_name: str, from_: dt.date, to_: dt.date, limit: int
 
     with pool.connection() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
+            # Sorts/aggregations grandes sobre 250k+ filas chocan con work_mem
+            # default (4MB) y caen a disco. Subirlo a 256MB para esta sesion
+            # mantiene todo en RAM. Es por-sesion, no afecta otros workers.
+            cur.execute("SET LOCAL work_mem = '256MB'")
             cur.execute(_TOP_PAGES_SQL, {
                 "filter": filter_name,
                 "cur_s": cur_r.start, "cur_e": cur_r.end,
@@ -156,16 +156,14 @@ def _format_row(r: dict) -> dict:
 
 _OPPORTUNITIES_SQL = """
 WITH per_q AS (
+    -- Una sola pasada: clicks + impressions_dedup + position en mismo GROUP BY.
+    -- Antes habia 2 CTEs (per_q, clicks_q) que escaneaban exactamente la misma
+    -- data con el mismo WHERE, solo diferentes aggregates.
     SELECT
         query,
+        SUM(clicks)::bigint                                    AS clicks,
         SUM(impressions_dedup)::bigint                         AS impressions,
         SUM(pos_num) / NULLIF(SUM(impressions_sum), 0)         AS position
-    FROM marts.kpis_query_diario
-    WHERE event_date BETWEEN %(cur_s)s AND %(cur_e)s
-    GROUP BY query
-),
-clicks_q AS (
-    SELECT query, SUM(clicks)::bigint AS clicks
     FROM marts.kpis_query_diario
     WHERE event_date BETWEEN %(cur_s)s AND %(cur_e)s
     GROUP BY query
@@ -199,14 +197,13 @@ per_q_yoy AS (
     GROUP BY query
 )
 SELECT
-    pq.query, tu.page, cq.clicks, pq.impressions, pq.position,
-    CASE WHEN pq.impressions > 0 THEN cq.clicks::float / pq.impressions ELSE 0 END AS ctr,
+    pq.query, tu.page, pq.clicks, pq.impressions, pq.position,
+    CASE WHEN pq.impressions > 0 THEN pq.clicks::float / pq.impressions ELSE 0 END AS ctr,
     COALESCE(m.clicks, 0)::bigint      AS mom_clicks,
     COALESCE(m.impressions, 0)::bigint AS mom_impressions,
     COALESCE(y.clicks, 0)::bigint      AS yoy_clicks,
     COALESCE(y.impressions, 0)::bigint AS yoy_impressions
 FROM per_q pq
-JOIN clicks_q cq  USING (query)
 JOIN top_url tu   USING (query)
 LEFT JOIN per_q_mom m USING (query)
 LEFT JOIN per_q_yoy y USING (query)
@@ -221,6 +218,7 @@ def compute_opportunities(from_: dt.date, to_: dt.date, limit: int = 50, min_imp
     cur_r, mom_r, yoy_r = compute_ranges(from_, to_)
     with pool.connection() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("SET LOCAL work_mem = '256MB'")
             cur.execute(_OPPORTUNITIES_SQL, {
                 "cur_s": cur_r.start, "cur_e": cur_r.end,
                 "mom_s": mom_r.start, "mom_e": mom_r.end,
@@ -339,6 +337,7 @@ def compute_cannibalization(from_: dt.date, to_: dt.date, limit: int = 50) -> di
     cur_r, _, _ = compute_ranges(from_, to_)
     with pool.connection() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("SET LOCAL work_mem = '256MB'")
             cur.execute(_CANNIBALIZATION_SQL, {
                 "cur_s": cur_r.start, "cur_e": cur_r.end,
                 "limit": limit,

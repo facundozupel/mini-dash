@@ -47,4 +47,4 @@ models:
           combination_of_columns: [query, event_date]
 
   - name: canib_query_page_daily
-    description: "VIEW de proyeccion sobre staging.endado_gsc_query_page_daily. Sirve a /tables/cannibalization."
+    description: "MV de proyeccion sobre staging.endado_gsc_query_page_daily con BRIN(event_date)+btree(query). Sirve a /tables/cannibalization."

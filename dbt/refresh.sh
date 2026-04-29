@@ -29,6 +29,21 @@ cd "$DBT_DIR" || { curl -fsS --retry 3 -m 10 --data-raw "cd $DBT_DIR failed" "${
 RC=$?
 
 if [ $RC -eq 0 ]; then
+    # ANALYZE inmediatamente despues de dbt: stats viejas hacen que el planner
+    # elija seq scan sobre BRIN. Sin esto, queries que deberian tardar 200ms
+    # tardan 10s+. dbt no corre ANALYZE automatico despues de run.
+    PG_CONTAINER=$(docker ps -q -f name=postgres_postgres)
+    if [ -n "$PG_CONTAINER" ]; then
+        docker exec -i "$PG_CONTAINER" psql -U postgres -d endado <<SQL >> "$LOG_FILE" 2>&1
+ANALYZE staging.endado_gsc_page_daily;
+ANALYZE staging.endado_gsc_query_page_daily;
+ANALYZE marts.kpis_diario;
+ANALYZE marts.kpis_query_diario;
+ANALYZE marts.top_pages_diario;
+ANALYZE marts.canib_query_page_daily;
+SQL
+    fi
+
     # Ping success
     curl -fsS --retry 3 -m 10 --data-raw "OK $(tail -3 ${LOG_FILE})" "${HC_URL}" > /dev/null 2>&1 || true
 
