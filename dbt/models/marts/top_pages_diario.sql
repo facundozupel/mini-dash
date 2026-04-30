@@ -4,7 +4,8 @@
     on_configuration_change='apply',
     indexes=[
       {'columns': ['filter', 'page', 'event_date'], 'unique': true},
-      {'columns': ['filter', 'event_date'], 'type': 'btree'},
+      {'columns': ['event_date'], 'type': 'brin'},
+      {'columns': ['filter'],     'type': 'btree'},
     ]
   )
 }}
@@ -14,6 +15,11 @@
 -- Grano: una fila por (filter, page, event_date). ~10-15M filas.
 -- Sirve a /tables/top-products y /tables/top-categories.
 -- MV con CONCURRENTLY para no bloquear lectores durante refresh.
+--
+-- BRIN(event_date) + btree(filter): rangos de fecha amplios sobre tabla grande
+-- chocaban con btree(filter, event_date) (heap fetches dispersos = 6-8s en
+-- custom range). ORDER BY event_date al final clustera la MV fisicamente para
+-- que BRIN devuelva block ranges ajustados.
 
 WITH base AS (
     SELECT
@@ -58,7 +64,10 @@ overall AS (
     GROUP BY event_date, page
 )
 
-SELECT * FROM overall
-UNION ALL SELECT * FROM products
-UNION ALL SELECT * FROM category
-UNION ALL SELECT * FROM recambios
+SELECT * FROM (
+    SELECT * FROM overall
+    UNION ALL SELECT * FROM products
+    UNION ALL SELECT * FROM category
+    UNION ALL SELECT * FROM recambios
+) u
+ORDER BY event_date

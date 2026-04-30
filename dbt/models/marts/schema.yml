@@ -48,3 +48,20 @@ models:
 
   - name: canib_query_page_daily
     description: "MV de proyeccion sobre staging.endado_gsc_query_page_daily con BRIN(event_date)+btree(query). Sirve a /tables/cannibalization."
+
+  - name: canib_query_summary_daily
+    description: "Resumen per (query, dia) con clicks, impressions_dedup, all_product_today y array de pages. Sirve al primer paso de /tables/cannibalization (filtrado y ranking de queries canibalizantes)."
+    columns:
+      - name: query
+        tests: [not_null]
+      - name: event_date
+        tests: [not_null]
+      - name: clicks
+        tests: [not_null]
+      - name: impressions
+        tests: [not_null]
+      - name: impressions_dedup
+        tests: [not_null]
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns: [query, event_date]

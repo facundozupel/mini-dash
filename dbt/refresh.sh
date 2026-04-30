@@ -41,6 +41,7 @@ ANALYZE marts.kpis_diario;
 ANALYZE marts.kpis_query_diario;
 ANALYZE marts.top_pages_diario;
 ANALYZE marts.canib_query_page_daily;
+ANALYZE marts.canib_query_summary_daily;
 SQL
     fi
 

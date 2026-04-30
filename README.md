@@ -94,6 +94,6 @@ Runbook completo en [`deploy/DEPLOY.md`](./deploy/DEPLOY.md). Incluye gotchas (e
 - [x] Pipeline raw -> staging -> marts modelado en dbt + cron diario 03:00 + ANALYZE post-refresh + Healthchecks.io
 - [x] **Deploy productivo**: front en Render, back en VPS con Swarm/Traefik, TLS automatico
 - [x] Endpoint `/internal/cache/prewarm` enganchado al cron de dbt para que el cache rote con el dia
+- [x] Custom date ranges optimizados en las 4 tablas (filter-first + BRIN + ORDER BY event_date donde faltaba): top-products 8s→0.25s, opportunities 47s→2.6s, canib 23s→6s. Warm <0.05s.
 - [ ] Tests unitarios
 - [ ] Auth (Google Sign-In + JWT)
-- [ ] Refactor SQL profundo: pre-aggregate canib query-grain para que custom date ranges tambien sean rapidos

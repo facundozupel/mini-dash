@@ -38,7 +38,7 @@ MICRO-DASH/
 │   ├── models/
 │   │   ├── sources.yml      ← raw declarada (extraccion_gsc, extraccion_gsc_page) + freshness
 │   │   ├── staging/         ← 2 modelos incremental con lookback 7d
-│   │   └── marts/           ← 4 modelos: 1 TABLE + 3 MV (canib promovido)
+│   │   └── marts/           ← 5 modelos: 1 TABLE + 4 MV
 │   └── tests/               ← custom test de equivalencia raw vs marts
 └── frontend/
     ├── index.html      ← Date picker + tabs + KPIs + chart toolbar + tablas
@@ -314,7 +314,8 @@ Lookback 7d: `WHERE date > MAX(event_date) - 7d`. Captura ajustes tardios de GSC
 | `marts.kpis_diario`             | TABLE | (filter, event_date)        | `/metrics/*`, `/trend/*` (filter pre-explotado, ~2.5k filas) |
 | `marts.top_pages_diario`        | MV    | (filter, page, event_date)  | `/tables/top-products`, `/tables/top-categories` (~10M filas, MV con CONCURRENTLY) |
 | `marts.kpis_query_diario`       | MV    | (query, event_date)         | `/tables/opportunities` (impressions_dedup pre-calculada) |
-| `marts.canib_query_page_daily`  | MV    | (query, page, event_date)   | `/tables/cannibalization` + top_url para opportunities. Era VIEW pero el seq scan a staging mataba la perf — promovido a MV con BRIN(event_date)+btree(query). |
+| `marts.canib_query_page_daily`  | MV    | (query, page, event_date)   | `/tables/cannibalization` (detalle URLs) + top_url para opportunities. Era VIEW pero el seq scan a staging mataba la perf — promovido a MV con BRIN(event_date)+btree(query). |
+| `marts.canib_query_summary_daily` | MV  | (query, event_date)         | `/tables/cannibalization` (filtrado y ranking inicial). Resumen sin la dimension `page`: clicks, impressions_dedup, all_product_today, array `pages`. Sirve para identificar queries canibalizantes en single-pass; el detalle se trae despues solo para las ~50 que pasan el filtro. |
 
 ### Refresh strategy
 
@@ -382,7 +383,9 @@ para que el storage clusteree.
 
 Aplicado en:
 - `staging.endado_gsc_query_page_daily` y `staging.endado_gsc_page_daily` (BRIN reemplazando btree)
-- `marts.canib_query_page_daily` (la MV nueva)
+- `marts.canib_query_page_daily` y `marts.canib_query_summary_daily` (BRIN(event_date) + btree(query))
+- `marts.kpis_query_diario` (BRIN reemplazando btree(event_date) + ORDER BY event_date al final del SELECT → MV clusterada por fecha)
+- `marts.top_pages_diario` (BRIN reemplazando btree(filter,event_date) + ORDER BY event_date dentro de un wrap del UNION ALL)
 
 ### 2. ANALYZE despues de cada `dbt run`
 
@@ -400,6 +403,42 @@ El default 4MB es bajisimo para sorts/groupbys >50k filas. EXPLAIN muestra
 Solucion: `cur.execute("SET LOCAL work_mem = '256MB'")` al inicio de cada query
 pesada. Ya aplicado en `compute_top_pages`, `compute_opportunities`,
 `compute_cannibalization`. Es por-sesion, no afecta otros workers.
+
+### 4. Patron filter-first, lookup-later
+
+Para tablas top-N con detalle pesado (ej: canib que ademas trae las URLs de
+cada query): NO traigas el detalle para el universo completo. Primero filtra y
+rankea con datos liviana (un mart pequeño per (query, dia)), tira el LIMIT N, y
+DESPUES traes el detalle solo para esas N filas (lookup por lista).
+
+Ejemplo concreto en canib:
+- Antes: scan completo de `marts.canib_query_page_daily` (grano page, ~14M filas)
+  para identificar queries canib + el detalle de URLs en una sola query → 23s
+  en custom range.
+- Ahora: scan de `marts.canib_query_summary_daily` (grano query, ~14M filas pero
+  ~10x mas livianas porque sin dimension page) para identificar las top-50
+  queries; despues `WHERE query IN (SELECT query FROM canib)` contra
+  `canib_query_page_daily` para traer URLs SOLO de esas 50 → 6s en custom range.
+
+Es la misma idea que esta atras del patron `LIMIT antes del JOIN pesado`. Si una
+tabla tarda mucho en custom range, mira si hay un join/scan que se podria
+diferir hasta despues del filtro de top-N.
+
+### 5. Single-pass sobre summary marts (HashAggregate vs Sort)
+
+Cuando una query tiene que agregar Y filtrar contra un computo derivado
+(ej: en canib, BOOL_AND(all_product) Y COUNT(DISTINCT pages)), tentacion es
+tener 2 CTEs que escanean el mismo mart. Postgres elige Sort+MergeJoin por
+default y eso es lento (sort de 700k+ rows = 1.8s).
+
+Truco: agregar todo en una sola pasada con HashAggregate guardando los
+componentes derivados en arrays/jsonb, y calcular el filtro derivado como
+subselect sobre la fila ya agregada. Subir `work_mem` a 512MB para que el
+HashAggregate quepa en RAM (110k buckets × jsonb arrays no entran en 256MB).
+
+Aplicado en `compute_cannibalization`: `jsonb_agg(to_jsonb(pages))` per query,
+despues `(SELECT COUNT(DISTINCT page_text) FROM jsonb_array_elements(...))`
+solo sobre las queries que pasan el filtro `all_product=true`.
 
 ### Como diagnosticar de nuevo
 
@@ -512,17 +551,22 @@ sshpass -p 'KWJuVnufxNLxLcWtqHxL' ssh -o StrictHostKeyChecking=no root@5.161.212
 - **Bucket cache (L2)** para `compute_metrics`: componentes per-day reusables entre rangos solapados
 - Stats hit/miss per-key (`/internal/cache/stats`) para medir antes de optimizar
 - Frontend con date picker, tabs, granularity, loading UX
-- **Pipeline raw → staging → marts modelado en dbt** (2 staging incremental + 4 marts daily-grain, canib promovido a MV)
+- **Pipeline raw → staging → marts modelado en dbt** (2 staging incremental + 5 marts daily-grain)
 - **Backend lee de marts.*** (filter como bind param, dedup MAX pre-calculada en mart)
-- **Cron diario 03:00** en VPS personal: dbt run + ANALYZE de los 6 modelos + prewarm + Healthchecks.io
-- 33 tests dbt (unique, not_null, accepted_values, freshness, equivalencia raw vs marts)
-- **Perf tuning**: BRIN(event_date), `work_mem='256MB'` por sesion en queries pesadas, CTEs duplicados mergeados. Default range pasa de 28-60s a 0.5-0.7s.
+- **Cron diario 03:00** en VPS personal: dbt run + ANALYZE de los 7 modelos + prewarm + Healthchecks.io
+- ~38 tests dbt (unique, not_null, accepted_values, freshness, equivalencia raw vs marts)
+- **Perf tuning**: BRIN(event_date), `work_mem='256-512MB'` por sesion en queries pesadas, CTEs duplicados mergeados. Default range pasa de 28-60s a 0.5-0.7s.
+- **Canib custom range optimizado**: nueva MV `marts.canib_query_summary_daily` (grano query+dia) + single-pass jsonb + filter-first. De 23s cold a 6s cold; warm instant via L1.
+- **Opportunities custom range optimizado**: filter-first (pos 10-20 + min_imp + LIMIT 50 antes de los joins) + BRIN(event_date) + ORDER BY event_date en `kpis_query_diario`. De 47s cold a 2.6s cold.
+- **Top-products / top-categories optimizado**: BRIN(event_date) + ORDER BY event_date en `top_pages_diario`. De 8s cold a 0.25s cold.
 - **Deploy productivo**: front en Render (`minidash.onrender.com`/custom domain), back en VPS Swarm/Traefik (`api-minidash.facundo.click`), TLS Let's Encrypt automatico.
 
 ⏳ Pendiente:
 - Auth (Google Sign-In + JWT + whitelist) — `GOOGLE_CLIENT_ID` y `JWT_SECRET` ya estan en `.env.example`
 - Tests unitarios de `cache.py` (ya es posible con `DictCacheStore`, falta escribirlos)
-- Refactor SQL profundo para que **custom date ranges** tambien sean rapidos (hoy: default = 0.5s warm, custom shifted = 8-30s cold). Idea: pre-aggregate canib a query-grain en una nueva MV `marts.canib_query_summary_daily`.
+- Hacer cold de canib `<3s` (hoy 5.8s). Posibilidades: pre-resolver el filtro
+  all_product en una columna pre-calculada por (query, dia) o explotar mas el
+  filter-first en el lookup de URLs.
 
 ## Gotchas conocidos
 

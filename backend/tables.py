@@ -155,25 +155,43 @@ def _format_row(r: dict) -> dict:
 #   - marts.canib_query_page_daily  : VIEW query+page+date para top_url
 
 _OPPORTUNITIES_SQL = """
+-- Patron filter-first, lookup-later:
+-- 1) Identificar las queries que pasan el filtro pos 10-20 + min_imp con UN
+--    solo scan al cur range. LIMIT 50.
+-- 2) Para esas ~50 queries, lookups por btree(query) en los marts pesados:
+--    top_url (canib_query_page_daily), MoM y YoY (kpis_query_diario).
+--
+-- Antes la query escaneaba 4 veces el universo entero (~150k queries) y recien
+-- al final aplicaba el filtro pos 10-20. Resultado: 47s cold en custom range.
+-- Ahora 3 de los 4 scans son lookups por lista (~50 queries).
+
 WITH per_q AS (
-    -- Una sola pasada: clicks + impressions_dedup + position en mismo GROUP BY.
-    -- Antes habia 2 CTEs (per_q, clicks_q) que escaneaban exactamente la misma
-    -- data con el mismo WHERE, solo diferentes aggregates.
     SELECT
         query,
-        SUM(clicks)::bigint                                    AS clicks,
-        SUM(impressions_dedup)::bigint                         AS impressions,
-        SUM(pos_num) / NULLIF(SUM(impressions_sum), 0)         AS position
+        SUM(clicks)::bigint                              AS clicks,
+        SUM(impressions_dedup)::bigint                   AS impressions,
+        SUM(pos_num) / NULLIF(SUM(impressions_sum), 0)   AS position
     FROM marts.kpis_query_diario
     WHERE event_date BETWEEN %(cur_s)s AND %(cur_e)s
     GROUP BY query
 ),
+qualified AS (
+    -- Filtro y LIMIT acá: el universo se achica de ~150k a ~50 queries.
+    SELECT query, clicks, impressions, position
+    FROM per_q
+    WHERE position BETWEEN 10 AND 20
+      AND impressions >= %(min_imp)s
+    ORDER BY impressions DESC
+    LIMIT %(limit)s
+),
+-- Lookups: query IN (lista de ~50) → btree(query) hit, no seq scan.
 top_url AS (
     SELECT DISTINCT ON (query) query, page
     FROM (
         SELECT query, page, SUM(impressions) AS imp
         FROM marts.canib_query_page_daily
         WHERE event_date BETWEEN %(cur_s)s AND %(cur_e)s
+          AND query IN (SELECT query FROM qualified)
         GROUP BY query, page
     ) t
     ORDER BY query, imp DESC
@@ -181,36 +199,35 @@ top_url AS (
 per_q_mom AS (
     SELECT
         query,
-        COALESCE(SUM(clicks), 0)::bigint               AS clicks,
-        COALESCE(SUM(impressions_dedup), 0)::bigint    AS impressions
+        SUM(clicks)::bigint              AS clicks,
+        SUM(impressions_dedup)::bigint   AS impressions
     FROM marts.kpis_query_diario
     WHERE event_date BETWEEN %(mom_s)s AND %(mom_e)s
+      AND query IN (SELECT query FROM qualified)
     GROUP BY query
 ),
 per_q_yoy AS (
     SELECT
         query,
-        COALESCE(SUM(clicks), 0)::bigint               AS clicks,
-        COALESCE(SUM(impressions_dedup), 0)::bigint    AS impressions
+        SUM(clicks)::bigint              AS clicks,
+        SUM(impressions_dedup)::bigint   AS impressions
     FROM marts.kpis_query_diario
     WHERE event_date BETWEEN %(yoy_s)s AND %(yoy_e)s
+      AND query IN (SELECT query FROM qualified)
     GROUP BY query
 )
 SELECT
-    pq.query, tu.page, pq.clicks, pq.impressions, pq.position,
-    CASE WHEN pq.impressions > 0 THEN pq.clicks::float / pq.impressions ELSE 0 END AS ctr,
+    q.query, tu.page, q.clicks, q.impressions, q.position,
+    CASE WHEN q.impressions > 0 THEN q.clicks::float / q.impressions ELSE 0 END AS ctr,
     COALESCE(m.clicks, 0)::bigint      AS mom_clicks,
     COALESCE(m.impressions, 0)::bigint AS mom_impressions,
     COALESCE(y.clicks, 0)::bigint      AS yoy_clicks,
     COALESCE(y.impressions, 0)::bigint AS yoy_impressions
-FROM per_q pq
+FROM qualified q
 JOIN top_url tu   USING (query)
 LEFT JOIN per_q_mom m USING (query)
 LEFT JOIN per_q_yoy y USING (query)
-WHERE pq.position BETWEEN 10 AND 20
-  AND pq.impressions >= %(min_imp)s
-ORDER BY pq.impressions DESC
-LIMIT %(limit)s
+ORDER BY q.impressions DESC
 """
 
 
@@ -264,70 +281,87 @@ def compute_opportunities(from_: dt.date, to_: dt.date, limit: int = 50, min_imp
 # =====================================================================
 #
 # Lee de:
-#   - marts.canib_query_page_daily : VIEW grano (query, page, date) con is_product
-#   - marts.kpis_query_diario      : usamos impressions_dedup pre-calculada
-#                                    en lugar de re-calcular MAX(impressions) GROUP BY query, date
+#   - marts.canib_query_summary_daily : grano (query, dia) con clicks,
+#     impressions_dedup, all_product_today y array `pages`. Sirve al filtro
+#     y ranking inicial sin tener que tocar el grano (query, page, dia).
+#   - marts.canib_query_page_daily    : grano (query, page, dia). Solo para el
+#     detalle de URLs de las ~50 queries que ya pasaron el filtro.
+#
+# Antes esta query escaneaba canib_query_page_daily DOS veces (q_pages full
+# range + urls_detail) + kpis_query_diario otra vez para impressions_dedup.
+# Ahora un solo scan a la summary mart (mucho mas chica) hace el ranking,
+# y el detalle es un lookup por lista de queries (rapido).
 
 _CANNIBALIZATION_SQL = """
-WITH q_pages AS (
+-- Single-pass sobre la summary mart: agrega clicks, impressions_dedup,
+-- all_product y los arrays de pages per-day en una sola pasada (HashAggregate).
+-- Despues calcula total_urls como subselect sobre las queries que ya pasan
+-- el filtro all_product (subplan corre solo para las ~5k candidates, no las 150k).
+WITH per_q AS (
     SELECT
         query,
-        page,
-        is_product,
-        SUM(clicks)::bigint                                         AS clicks,
-        SUM(impressions)::bigint                                    AS impressions,
-        SUM(position*impressions)/NULLIF(SUM(impressions),0)        AS position
-    FROM marts.canib_query_page_daily
+        SUM(clicks)::bigint                AS clicks,
+        SUM(impressions_dedup)::bigint     AS impressions,
+        BOOL_AND(all_product_today)        AS all_product,
+        jsonb_agg(to_jsonb(pages))         AS pages_per_day
+    FROM marts.canib_query_summary_daily
     WHERE event_date BETWEEN %(cur_s)s AND %(cur_e)s
-    GROUP BY query, page, is_product
-),
-q_summary AS (
-    SELECT
-        query,
-        COUNT(DISTINCT page)                                         AS total_urls,
-        COUNT(DISTINCT page) FILTER (WHERE is_product = true)        AS product_urls,
-        SUM(clicks)::bigint                                          AS clicks
-    FROM q_pages
     GROUP BY query
 ),
--- queries canibalizantes: >1 URL y TODAS producto
 canib AS (
-    SELECT query, total_urls, clicks
-    FROM q_summary
-    WHERE product_urls = total_urls
-      AND total_urls > 1
+    SELECT
+        query,
+        clicks,
+        impressions,
+        total_urls
+    FROM (
+        SELECT
+            query,
+            clicks,
+            impressions,
+            (
+                SELECT COUNT(DISTINCT page_text)
+                FROM jsonb_array_elements(pages_per_day) AS day_arr,
+                     jsonb_array_elements_text(day_arr) AS page_text
+            ) AS total_urls
+        FROM per_q
+        WHERE all_product = true
+    ) q
+    WHERE total_urls > 1
     ORDER BY clicks DESC
     LIMIT %(limit)s
 ),
--- impresiones DEDUP por query: usamos el mart que ya tiene impressions_dedup pre-calculada
-imp_q AS (
-    SELECT query, SUM(impressions_dedup)::bigint AS impressions
-    FROM marts.kpis_query_diario
-    WHERE event_date BETWEEN %(cur_s)s AND %(cur_e)s
-    GROUP BY query
-),
--- Detalle de URLs por query canibalizante (JSON)
+-- Detalle de URLs solo para las queries canib (lookup por lista, no scan
+-- completo). Re-agrega clicks/impressions/position desde el grano page-day.
 urls_detail AS (
     SELECT
         qp.query,
         jsonb_agg(
             jsonb_build_object(
                 'page', qp.page,
-                'clicks', qp.clicks,
-                'impressions', qp.impressions,
-                'position', qp.position
-            ) ORDER BY qp.clicks DESC
+                'clicks', qp.clicks_sum,
+                'impressions', qp.impressions_sum,
+                'position', qp.position_avg
+            ) ORDER BY qp.clicks_sum DESC
         ) AS urls
-    FROM q_pages qp
-    JOIN canib c ON c.query = qp.query
+    FROM (
+        SELECT
+            query,
+            page,
+            SUM(clicks)::bigint                                   AS clicks_sum,
+            SUM(impressions)::bigint                              AS impressions_sum,
+            SUM(position*impressions)/NULLIF(SUM(impressions),0)  AS position_avg
+        FROM marts.canib_query_page_daily
+        WHERE event_date BETWEEN %(cur_s)s AND %(cur_e)s
+          AND query IN (SELECT query FROM canib)
+        GROUP BY query, page
+    ) qp
     GROUP BY qp.query
 )
 SELECT
-    c.query, c.total_urls, c.clicks,
-    i.impressions,
+    c.query, c.total_urls, c.clicks, c.impressions,
     u.urls
 FROM canib c
-JOIN imp_q i  USING (query)
 JOIN urls_detail u USING (query)
 ORDER BY c.clicks DESC
 """
@@ -337,7 +371,10 @@ def compute_cannibalization(from_: dt.date, to_: dt.date, limit: int = 50) -> di
     cur_r, _, _ = compute_ranges(from_, to_)
     with pool.connection() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
-            cur.execute("SET LOCAL work_mem = '256MB'")
+            # 512MB acotado a esta sesion: el HashAggregate de la summary mart
+            # arma 110k buckets con jsonb arrays adentro y se queda corto con
+            # 256MB (caia a Sort+GroupAggregate, ~3x mas lento).
+            cur.execute("SET LOCAL work_mem = '512MB'")
             cur.execute(_CANNIBALIZATION_SQL, {
                 "cur_s": cur_r.start, "cur_e": cur_r.end,
                 "limit": limit,
