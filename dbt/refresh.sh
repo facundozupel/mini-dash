@@ -35,8 +35,9 @@ if [ $RC -eq 0 ]; then
     PG_CONTAINER=$(docker ps -q -f name=postgres_postgres)
     if [ -n "$PG_CONTAINER" ]; then
         docker exec -i "$PG_CONTAINER" psql -U postgres -d endado <<SQL >> "$LOG_FILE" 2>&1
+ANALYZE public.extraccion_gsc;
+ANALYZE public.extraccion_gsc_page;
 ANALYZE staging.endado_gsc_page_daily;
-ANALYZE staging.endado_gsc_query_page_daily;
 ANALYZE marts.kpis_diario;
 ANALYZE marts.kpis_query_diario;
 ANALYZE marts.top_pages_diario;

@@ -1,24 +1,20 @@
 {{
   config(
-    materialized='incremental',
-    unique_key=['query', 'page', 'event_date'],
-    on_schema_change='sync_all_columns',
-    indexes=[
-      {'columns': ['event_date'], 'type': 'brin'},
-      {'columns': ['query'], 'type': 'btree'},
-      {'columns': ['page'], 'type': 'btree'},
-    ]
+    materialized='view'
   )
 }}
 
 -- staging.endado_gsc_query_page_daily
 -- Limpieza de extraccion_gsc con flags pre-calculados.
 -- Grano: una fila por (query, page, event_date). ~18M filas.
--- Refresh incremental con lookback 7 dias.
 --
--- BRIN(event_date): los rangos amplios (>1% de la tabla) le ganaban al btree
--- (Postgres elegia seq scan). BRIN ocupa ~100x menos y es ideal para columnas
--- ordenadas fisicamente, que es el caso porque los rows se appendean por fecha.
+-- Era TABLE incremental (3.4 GB en disco). Convertida a VIEW para liberar
+-- espacio: las transformaciones aplicadas son CPU-cheap (CASE/COALESCE/cast/
+-- multiplicacion) y los marts downstream son MV/TABLE full-refresh, asi que
+-- recomputan todo igual. El "ahorro" del lookback 7d incremental ya no aplicaba.
+--
+-- Pre-requisito: raw.extraccion_gsc debe tener BRIN(date) para que los marts
+-- consumidores puedan filtrar rangos amplios sin caer en seq scan.
 
 SELECT
     date                                               AS event_date,
@@ -40,7 +36,3 @@ SELECT
     position                                           AS position,
     position * impressions::float                      AS pos_num
 FROM {{ source('raw', 'extraccion_gsc') }}
-
-{% if is_incremental() %}
-WHERE date > (SELECT COALESCE(MAX(event_date), '1900-01-01'::date) - INTERVAL '7 days' FROM {{ this }})
-{% endif %}

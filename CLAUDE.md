@@ -293,12 +293,18 @@ Sin Postgres, sin FastAPI, milisegundos.
 Pipeline `raw -> staging -> marts` orquestado por dbt-core en VPS endado, refresh
 diario 03:00 via cron + Healthchecks.io.
 
-### staging.* (limpieza, TABLE incremental con lookback 7d)
+### staging.* (limpieza, mix de TABLE incremental + VIEW)
 
-| Tabla | Grano | Filas | Sirve a |
-|---|---|---|---|
-| `staging.endado_gsc_page_daily`       | (page, event_date)        | 2.7M  | base page-level, alimenta marts.kpis_diario y marts.top_pages_diario |
-| `staging.endado_gsc_query_page_daily` | (query, page, event_date) | 18M   | base query-level, alimenta marts.kpis_query_diario y marts.canib_query_page_daily |
+| Tabla | Materializacion | Grano | Filas | Sirve a |
+|---|---|---|---|---|
+| `staging.endado_gsc_page_daily`       | TABLE incremental (lookback 7d) | (page, event_date)        | 2.7M  | base page-level, alimenta marts.kpis_diario y marts.top_pages_diario |
+| `staging.endado_gsc_query_page_daily` | **VIEW** (sin materializar)     | (query, page, event_date) | 18M   | base query-level, alimenta marts.kpis_query_diario y los 2 canib marts |
+
+> `endado_gsc_query_page_daily` era TABLE incremental (3.4 GB) pero las transformaciones
+> aplicadas son CPU-cheap (CASE/COALESCE/cast/multiplicacion) y los marts downstream
+> son MV/TABLE full-refresh, asi que recomputan todo igual. Pasarla a VIEW libera 3.4 GB
+> en disco. Pre-requisito: `public.extraccion_gsc` necesita BRIN(date) (no btree) para
+> que los marts consumidores filtren rangos amplios sin caer en seq scan.
 
 Las staging tienen **flags pre-calculados** (`is_product`, `is_blog`, `is_brand`,
 `is_recambio`, `is_home`) y **`pos_num = position * impressions`** listo para componer
@@ -382,7 +388,8 @@ ordenadas. Para una MV nueva, agregar `ORDER BY event_date` al final del SELECT
 para que el storage clusteree.
 
 Aplicado en:
-- `staging.endado_gsc_query_page_daily` y `staging.endado_gsc_page_daily` (BRIN reemplazando btree)
+- `public.extraccion_gsc` y `public.extraccion_gsc_page` (BRIN reemplazando btree — necesario porque `staging.endado_gsc_query_page_daily` es VIEW y los marts filtran event_date directo contra raw)
+- `staging.endado_gsc_page_daily` (BRIN reemplazando btree)
 - `marts.canib_query_page_daily` y `marts.canib_query_summary_daily` (BRIN(event_date) + btree(query))
 - `marts.kpis_query_diario` (BRIN reemplazando btree(event_date) + ORDER BY event_date al final del SELECT → MV clusterada por fecha)
 - `marts.top_pages_diario` (BRIN reemplazando btree(filter,event_date) + ORDER BY event_date dentro de un wrap del UNION ALL)
@@ -392,8 +399,10 @@ Aplicado en:
 dbt **NO** corre ANALYZE automatico. Stats viejas → planner elige seq scan aunque
 exista BRIN. Smoking gun: misma query pasa de 10s → 200ms con un solo `ANALYZE`.
 
-Por eso `dbt/refresh.sh` corre ANALYZE de los 6 modelos clave despues del refresh
-diario. Si agregas un mart nuevo, sumalo al bloque ANALYZE del script.
+Por eso `dbt/refresh.sh` corre ANALYZE de los marts + raw despues del refresh
+diario. Si agregas un mart nuevo, sumalo al bloque ANALYZE del script. Importante:
+**incluye `public.extraccion_gsc` y `public.extraccion_gsc_page`** porque la
+staging query-level es VIEW y los marts filtran event_date directo contra raw.
 
 ### 3. `work_mem` por sesion
 
