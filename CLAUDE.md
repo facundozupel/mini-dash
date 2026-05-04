@@ -325,13 +325,23 @@ Lookback 7d: `WHERE date > MAX(event_date) - 7d`. Captura ajustes tardios de GSC
 
 ### Refresh strategy
 
-Cron diario 03:00 en VPS endado: `0 3 * * * /opt/MICRO-DASH/dbt/refresh.sh`.
+Cron diario 07:00 en VPS personal (5.161.212.136): `0 7 * * * /opt/MICRO-DASH/dbt/refresh.sh`.
+
+> **Por que 07:00 y no antes:** la raw `public.extraccion_gsc*` es alimentada por
+> scripts en el **VPS de trabajo** (89.117.150.65) que corren a:
+>   - 06:00 → `extraccion_diaria_gsc_endado.py`      → llena `extraccion_gsc`
+>   - 06:30 → `extraccion_diaria_gsc_page_endado.py` → llena `extraccion_gsc_page`
+>
+> El dbt tiene que correr **despues** de las dos extracciones, sino se queda
+> 1 dia mas atrasado del lag natural de GSC (~3d). Originalmente estaba a las
+> 03:00 lo que daba data 4d vieja en lugar de 3d.
 
 El script:
 1. Ping `/start` a Healthchecks.io.
 2. `dbt run` (incremental para staging, full para marts).
-3. Si OK → ping `/` con cola del log; si falla → ping `/fail`.
-4. Healthchecks alerta por mail si no llega ping en 25h (1d schedule + 1h grace).
+3. Si OK → ANALYZE de raw + staging + marts → prewarm del API → ping `/` con cola del log.
+4. Si falla → ping `/fail` y skip ANALYZE/prewarm.
+5. Healthchecks alerta por mail si no llega ping en 25h (1d schedule + 1h grace).
 
 Logs: `/var/log/dbt-minidash/run-YYYY-MM-DD-HHMM.log`.
 
