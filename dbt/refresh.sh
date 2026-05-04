@@ -49,11 +49,19 @@ SQL
     # Ping success
     curl -fsS --retry 3 -m 10 --data-raw "OK $(tail -3 ${LOG_FILE})" "${HC_URL}" > /dev/null 2>&1 || true
 
-    # Re-warm cache del API con el today() actualizado. Sin esto, el primer
-    # usuario despues del rollover diario espera 60s mientras se computa.
+    # Refresh del cache del API. Dos pasos:
+    #   1. flush   - tira todas las keys vivas. Garantiza que rangos custom
+    #                cacheados con marts viejos no sobrevivan al refresh.
+    #   2. prewarm - re-llena las keys default (4 metrics + 12 trends + 4
+    #                tablas) leyendo de marts frescos. Sin esto, el primer
+    #                usuario del dia espera 60s mientras se computa.
     ENV_FILE="/opt/mini-dash/deploy/.env"
     if [ -f "$ENV_FILE" ]; then
         SECRET=$(grep '^INTERNAL_SECRET=' "$ENV_FILE" | cut -d= -f2-)
+        curl -fsS --retry 2 -m 30 -X POST \
+            -H "x-internal-secret: ${SECRET}" \
+            https://api-minidash.facundo.click/internal/cache/flush \
+            >> "$LOG_FILE" 2>&1 || true
         curl -fsS --retry 2 -m 30 -X POST \
             -H "x-internal-secret: ${SECRET}" \
             https://api-minidash.facundo.click/internal/cache/prewarm \
