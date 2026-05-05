@@ -225,6 +225,35 @@ body {
 }
 
 /* ============================================================
+   Modes (GSC / Bots) — switcher arriba de los tabs.
+   Mas chico y monospace para que no compita con los tabs.
+   ============================================================ */
+.modes {
+  display: flex;
+  gap: 24px;
+  margin-bottom: 24px;
+}
+.mode {
+  background: transparent;
+  border: none;
+  padding: 6px 0;
+  cursor: pointer;
+  font-family: var(--mono, "JetBrains Mono", ui-monospace, monospace);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  border-bottom: 1px solid transparent;
+  transition: color 0.15s, border-color 0.15s;
+}
+.mode:hover { color: var(--ink-2); }
+.mode.active {
+  color: var(--ink);
+  border-bottom-color: var(--ink);
+}
+
+/* ============================================================
    Tabs (text only, italic active, hairline)
    ============================================================ */
 .tabs {

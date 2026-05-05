@@ -35,56 +35,112 @@
     </div>
   </header>
 
-  <nav class="tabs">
-    <button class="tab active" data-filter="overall">Overall</button>
-    <button class="tab" data-filter="products">Productos</button>
-    <button class="tab" data-filter="category">Categorías</button>
-    <button class="tab" data-filter="recambios">Recambios</button>
+  <nav class="modes" role="tablist" aria-label="Fuente de datos">
+    <button class="mode active" data-mode="gsc">GSC</button>
+    <button class="mode" data-mode="bots">Bots</button>
   </nav>
 
-  <section class="metric-block">
-    <div class="kpis" id="kpis"></div>
+  <div id="gsc-view">
+    <nav class="tabs">
+      <button class="tab active" data-filter="overall">Overall</button>
+      <button class="tab" data-filter="products">Productos</button>
+      <button class="tab" data-filter="category">Categorías</button>
+      <button class="tab" data-filter="recambios">Recambios</button>
+    </nav>
 
-    <div class="chart-toolbar">
-      <div class="chart-toolbar-meta">
-        <span class="kicker">Evolución</span>
-        <span class="chart-toolbar-label" id="chart-range-label">últimos 24 meses</span>
+    <section class="metric-block">
+      <div class="kpis" id="kpis"></div>
+
+      <div class="chart-toolbar">
+        <div class="chart-toolbar-meta">
+          <span class="kicker">Evolución</span>
+          <span class="chart-toolbar-label" id="chart-range-label">últimos 24 meses</span>
+        </div>
+        <div class="seg" role="tablist">
+          <button class="seg-btn" data-gran="day">día</button>
+          <button class="seg-btn" data-gran="week">semana</button>
+          <button class="seg-btn active" data-gran="month">mes</button>
+        </div>
       </div>
-      <div class="seg" role="tablist">
-        <button class="seg-btn" data-gran="day">día</button>
-        <button class="seg-btn" data-gran="week">semana</button>
-        <button class="seg-btn active" data-gran="month">mes</button>
+
+      <div class="chart-wrap">
+        <div id="trend-loading" class="chart-loading hidden"><div class="spinner"></div><span>cargando trend…</span></div>
+        <canvas id="trend-chart"></canvas>
       </div>
-    </div>
+    </section>
 
-    <div class="chart-wrap">
-      <div id="trend-loading" class="chart-loading hidden"><div class="spinner"></div><span>cargando trend…</span></div>
-      <canvas id="trend-chart"></canvas>
-    </div>
-  </section>
+    <section class="tables">
+      <details open>
+        <summary><span class="num">01</span><span class="title">Top 20 Productos</span></summary>
+        <div id="top-products-table"></div>
+      </details>
+      <details>
+        <summary><span class="num">02</span><span class="title">Top 20 Categorías</span></summary>
+        <div id="top-categories-table"></div>
+      </details>
+      <details>
+        <summary><span class="num">03</span><span class="title">Oportunidades · queries posición 10–20</span></summary>
+        <div id="opportunities-table"></div>
+      </details>
+      <details>
+        <summary><span class="num">04</span><span class="title">Canibalización de productos</span></summary>
+        <div id="cannibalization-table"></div>
+      </details>
+    </section>
+  </div>
 
-  <section class="tables">
-    <details open>
-      <summary><span class="num">01</span><span class="title">Top 20 Productos</span></summary>
-      <div id="top-products-table"></div>
-    </details>
-    <details>
-      <summary><span class="num">02</span><span class="title">Top 20 Categorías</span></summary>
-      <div id="top-categories-table"></div>
-    </details>
-    <details>
-      <summary><span class="num">03</span><span class="title">Oportunidades · queries posición 10–20</span></summary>
-      <div id="opportunities-table"></div>
-    </details>
-    <details>
-      <summary><span class="num">04</span><span class="title">Canibalización de productos</span></summary>
-      <div id="cannibalization-table"></div>
-    </details>
-  </section>
+  <div id="bots-view" class="hidden">
+    <nav class="tabs">
+      <button class="tab active" data-bot-filter="all">All</button>
+      <button class="tab" data-bot-filter="ai">AI</button>
+      <button class="tab" data-bot-filter="search">Search</button>
+      <button class="tab" data-bot-filter="other">Other</button>
+    </nav>
+
+    <section class="metric-block">
+      <div class="kpis" id="bot-kpis"></div>
+
+      <div class="chart-toolbar">
+        <div class="chart-toolbar-meta">
+          <span class="kicker">Evolución bots</span>
+          <span class="chart-toolbar-label">últimos 24 meses</span>
+        </div>
+        <div class="seg" role="tablist">
+          <button class="seg-btn" data-bot-gran="day">día</button>
+          <button class="seg-btn" data-bot-gran="week">semana</button>
+          <button class="seg-btn active" data-bot-gran="month">mes</button>
+        </div>
+      </div>
+
+      <div class="chart-wrap">
+        <div id="bot-trend-loading" class="chart-loading hidden"><div class="spinner"></div><span>cargando trend…</span></div>
+        <canvas id="bot-trend-chart"></canvas>
+      </div>
+    </section>
+
+    <section class="tables">
+      <details open>
+        <summary><span class="num">01</span><span class="title">Top 20 URLs crawleadas</span></summary>
+        <div id="bot-top-urls-table"></div>
+      </details>
+      <details>
+        <summary><span class="num">02</span><span class="title">Top 20 Bots</span></summary>
+        <div id="bot-top-bots-table"></div>
+      </details>
+      <details>
+        <summary><span class="num">03</span><span class="title">Por sección</span></summary>
+        <div id="bot-by-section-table"></div>
+      </details>
+      <details>
+        <summary><span class="num">04</span><span class="title">Distribución HTTP status</span></summary>
+        <div id="bot-by-status-table"></div>
+      </details>
+    </section>
+  </div>
 
   <footer class="colofon">
-    <span>endado.com · datos GSC</span>
-    <span>actualizado diariamente · 03:00</span>
+    <span id="footer-source">endado.com · datos GSC</span>
+    <span>actualizado diariamente · 07:00</span>
   </footer>
 
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
