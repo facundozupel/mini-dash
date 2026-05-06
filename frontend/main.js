@@ -509,19 +509,107 @@ function renderBotByStatusTable(rows) {
   if (!rows?.length) { target.innerHTML = `<div style="padding:16px;color:#8b92a3">Sin datos.</div>`; return; }
   const head = `
     <tr>
+      <th></th>
       <th>Status class</th>
       <th class="num">Hits</th>
       <th class="num">% del total</th>
       <th class="num">Bytes</th>
     </tr>`;
+  // Cada fila pintada con su drill-down row hidden debajo.
+  // Click en la fila → carga URLs Googlebot con ese status_class.
   const body = rows.map((r) => `
-    <tr>
+    <tr class="status-row" data-status-class="${escapeHtml(r.status_class)}">
+      <td class="caret">▸</td>
       <td>${escapeHtml(r.status_class)}</td>
       <td class="num">${fmt.int(r.hits)}</td>
       <td class="num">${fmt.pct2(r.share)}</td>
       <td class="num">${fmt.bytes(r.total_bytes)}</td>
+    </tr>
+    <tr class="status-drill hidden" data-status-class="${escapeHtml(r.status_class)}">
+      <td colspan="5"><div class="drill-content"><div class="drill-empty">click para cargar…</div></div></td>
     </tr>`).join("");
-  target.innerHTML = `<table><thead>${head}</thead><tbody>${body}</tbody></table>`;
+  target.innerHTML = `<table class="status-table"><thead>${head}</thead><tbody>${body}</tbody></table>`;
+
+  // Wire clicks
+  target.querySelectorAll(".status-row").forEach((row) => {
+    row.addEventListener("click", () => toggleStatusDrill(row));
+  });
+}
+
+// Cache local: status_class → rows ya traidas.
+const _drillCache = {};
+
+async function toggleStatusDrill(row) {
+  const statusClass = row.dataset.statusClass;
+  const drillRow = document.querySelector(`#bot-by-status-table .status-drill[data-status-class="${statusClass}"]`);
+  if (!drillRow) return;
+
+  const isOpen = !drillRow.classList.contains("hidden");
+  if (isOpen) {
+    drillRow.classList.add("hidden");
+    row.querySelector(".caret").textContent = "▸";
+    return;
+  }
+
+  drillRow.classList.remove("hidden");
+  row.querySelector(".caret").textContent = "▾";
+
+  if (_drillCache[statusClass]) {
+    renderDrillContent(drillRow, _drillCache[statusClass], statusClass);
+    return;
+  }
+
+  // Loading skeleton
+  drillRow.querySelector(".drill-content").innerHTML =
+    `<div class="drill-loading"><div class="spinner"></div><span>cargando URLs ${statusClass} de Googlebot…</span></div>`;
+
+  try {
+    const r = await fetchBotJSON(
+      `/tables/urls-by-status/${state.botFilter}/${statusClass}`,
+      { bot_name: "Googlebot", limit: 20 }
+    );
+    _drillCache[statusClass] = r.data;
+    renderDrillContent(drillRow, r.data, statusClass);
+  } catch (e) {
+    drillRow.querySelector(".drill-content").innerHTML =
+      `<div class="drill-empty">Error: ${escapeHtml(e.message)}</div>`;
+  }
+}
+
+function renderDrillContent(drillRow, data, statusClass) {
+  const rows = data.rows || [];
+  if (!rows.length) {
+    drillRow.querySelector(".drill-content").innerHTML =
+      `<div class="drill-empty">Sin URLs ${statusClass} de Googlebot en este rango.</div>`;
+    return;
+  }
+  const head = `
+    <tr>
+      <th>URL</th>
+      <th>Sección</th>
+      <th class="num">Hits Googlebot</th>
+      <th class="num">Bytes prom/hit</th>
+      <th class="num">Bytes totales</th>
+    </tr>`;
+  const body = rows.map((r) => {
+    const path = r.url_path;
+    return `
+      <tr>
+        <td class="page-cell"><a href="https://www.endado.com${escapeHtml(path)}" target="_blank" rel="noopener" title="${escapeHtml(path)}">${escapeHtml(path)}</a></td>
+        <td>${escapeHtml(r.section_top ?? "—")}</td>
+        <td class="num">${fmt.int(r.hits)}</td>
+        <td class="num">${fmt.bytes(r.avg_bytes_per_hit)}</td>
+        <td class="num">${fmt.bytes(r.total_bytes)}</td>
+      </tr>`;
+  }).join("");
+  drillRow.querySelector(".drill-content").innerHTML =
+    `<div class="drill-meta">URLs con <strong>${statusClass}</strong> · bot <strong>Googlebot</strong> · top ${rows.length}</div>` +
+    `<table class="drill-table"><thead>${head}</thead><tbody>${body}</tbody></table>`;
+}
+
+// Si el user cambia filter o fechas, las drills cacheadas dejan de aplicar.
+function _invalidateDrillCache() {
+  for (const k of Object.keys(_drillCache)) delete _drillCache[k];
 }
 
 // ============================================================
@@ -574,6 +662,7 @@ async function loadAllBots() {
 }
 
 async function reloadBotsByDate() {
+  _invalidateDrillCache();
   setLoading(true);
   try { await Promise.all([loadBotMetrics(), loadBotTables()]); }
   catch (e) { console.error(e); alert("Error: " + e.message); }
@@ -581,6 +670,7 @@ async function reloadBotsByDate() {
 }
 
 async function reloadBotsByFilter() {
+  _invalidateDrillCache();
   setLoading(true);
   try { await Promise.all([loadBotMetrics(), loadBotTrend(), loadBotTables()]); }
   catch (e) { console.error(e); alert("Error: " + e.message); }
