@@ -741,6 +741,22 @@ document.querySelectorAll("[data-bot-gran]").forEach((btn) => {
 });
 
 // Switcher GSC / Bots — toggle de views, lazy load la primera vez que se entra a bots.
+// Cada modo tiene un data lag distinto. GSC reescribe datos hasta ~3 dias atras;
+// los logs Apache son inmutables y la pipeline tiene 1 dia de lag.
+// Si el user no toco fechas manualmente, ajustamos al lag del modo activo
+// para caer sobre el rango prewarmeado en cada API.
+const DEFAULT_LAG = { gsc: 3, bots: 1 };
+
+function setDefaultRangeForMode(mode) {
+  const lag = DEFAULT_LAG[mode] ?? 1;
+  const defaultTo = daysAgo(lag);
+  const defaultFrom = daysAgo(lag + 29);
+  state.from = defaultFrom;
+  state.to = defaultTo;
+  document.getElementById("from").value = defaultFrom;
+  document.getElementById("to").value = defaultTo;
+}
+
 document.querySelectorAll(".mode").forEach((btn) => {
   btn.addEventListener("click", () => {
     const newMode = btn.dataset.mode;
@@ -752,21 +768,27 @@ document.querySelectorAll(".mode").forEach((btn) => {
     document.getElementById("bots-view").classList.toggle("hidden", newMode !== "bots");
     document.getElementById("footer-source").textContent =
       newMode === "bots" ? "endado.com · logs Apache (bots)" : "endado.com · datos GSC";
+
+    // Ajusta fechas al lag del modo nuevo asi siempre caemos en el rango
+    // prewarmeado (sub-segundo). Si el user las toco manualmente despues
+    // del init, igual las sobreescribimos — es el costo de no romper el cache hit.
+    setDefaultRangeForMode(newMode);
+
     if (newMode === "bots" && !state.botsLoaded) {
       state.botsLoaded = true;
       loadAllBots();
+    } else if (newMode === "bots") {
+      reloadBotsByDate();
+    } else {
+      reloadByDate();
     }
   });
 });
 
 // ============================================================
-//  Init — default: ultimos 30d ending today-3 (GSC lag)
+//  Init — arranca en modo GSC con su default lag
 // ============================================================
 (function init() {
-  const defaultTo   = daysAgo(3);
-  const defaultFrom = daysAgo(3 + 29);
-  state.from = defaultFrom; state.to = defaultTo;
-  document.getElementById("from").value = defaultFrom;
-  document.getElementById("to").value   = defaultTo;
+  setDefaultRangeForMode(state.mode);
   loadAll();
 })();
