@@ -22,6 +22,8 @@ const state = {
   botFilter: "all",                   // Bots: all | ai | search | other
   botGranularity: "month",            // Bots trend
   botsLoaded: false,                  // lazy init del modo bots la primera vez que se entra
+  drillBot: "Googlebot",              // bot usado en /tables/by-status drill-down
+  drillBotsList: ["Googlebot"],       // poblado con los top bots cuando llega /tables/top-bots
 };
 
 let chart = null;       // chart de GSC
@@ -507,6 +509,17 @@ function renderBotBySectionTable(rows) {
 function renderBotByStatusTable(rows) {
   const target = document.getElementById("bot-by-status-table");
   if (!rows?.length) { target.innerHTML = `<div style="padding:16px;color:#8b92a3">Sin datos.</div>`; return; }
+
+  // Dropdown chico de bots para el drill-down. Default = state.drillBot.
+  const opts = state.drillBotsList.map((b) =>
+    `<option value="${escapeHtml(b)}"${b === state.drillBot ? " selected" : ""}>${escapeHtml(b)}</option>`
+  ).join("");
+  const drillToolbar = `
+    <div class="drill-toolbar">
+      <span class="drill-toolbar-label">drill-down bot</span>
+      <select id="drill-bot-select" class="drill-select">${opts}</select>
+    </div>`;
+
   const head = `
     <tr>
       <th></th>
@@ -528,12 +541,34 @@ function renderBotByStatusTable(rows) {
     <tr class="status-drill hidden" data-status-class="${escapeHtml(r.status_class)}">
       <td colspan="5"><div class="drill-content"><div class="drill-empty">click para cargar…</div></div></td>
     </tr>`).join("");
-  target.innerHTML = `<table class="status-table"><thead>${head}</thead><tbody>${body}</tbody></table>`;
+  target.innerHTML = drillToolbar + `<table class="status-table"><thead>${head}</thead><tbody>${body}</tbody></table>`;
 
-  // Wire clicks
+  // Wire clicks de filas
   target.querySelectorAll(".status-row").forEach((row) => {
     row.addEventListener("click", () => toggleStatusDrill(row));
   });
+
+  // Wire dropdown — al cambiar bot invalidamos cache y recargamos cualquier drill abierto.
+  const sel = target.querySelector("#drill-bot-select");
+  if (sel) {
+    sel.addEventListener("change", async (e) => {
+      e.stopPropagation();
+      state.drillBot = sel.value;
+      _invalidateDrillCache();
+      // Re-fetch cualquier drill que estaba abierto.
+      const openDrills = target.querySelectorAll(".status-drill:not(.hidden)");
+      for (const drillRow of openDrills) {
+        const sc = drillRow.dataset.statusClass;
+        const statusRow = target.querySelector(`.status-row[data-status-class="${sc}"]`);
+        // Truco: marcamos como cerrado y re-abrimos para reusar el flow.
+        drillRow.classList.add("hidden");
+        if (statusRow) statusRow.querySelector(".caret").textContent = "▸";
+        toggleStatusDrill(statusRow);
+      }
+    });
+    // Click en el select no debe propagar al click del row.
+    sel.addEventListener("click", (e) => e.stopPropagation());
+  }
 }
 
 // Cache local: status_class → rows ya traidas.
@@ -566,7 +601,7 @@ async function toggleStatusDrill(row) {
   try {
     const r = await fetchBotJSON(
       `/tables/urls-by-status/${state.botFilter}/${statusClass}`,
-      { bot_name: "Googlebot", limit: 20 }
+      { bot_name: state.drillBot, limit: 20 }
     );
     _drillCache[statusClass] = r.data;
     renderDrillContent(drillRow, r.data, statusClass);
@@ -643,6 +678,11 @@ async function loadBotTables() {
     fetchBotJSON(`/tables/by-section/${state.botFilter}`),
     fetchBotJSON(`/tables/by-status/${state.botFilter}`),
   ]);
+  // Poblar lista de bots para el dropdown del drill-down (top 15, ordenados por hits).
+  state.drillBotsList = (topBots.data.rows || []).slice(0, 15).map((r) => r.bot_name);
+  if (state.drillBotsList.length && !state.drillBotsList.includes(state.drillBot)) {
+    state.drillBot = state.drillBotsList[0];
+  }
   renderBotTopUrlsTable(topUrls.data.rows);
   renderBotTopBotsTable(topBots.data.rows);
   renderBotBySectionTable(bySection.data.rows);
