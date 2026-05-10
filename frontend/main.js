@@ -461,6 +461,7 @@ function renderBotTopBotsTable(rows) {
   };
   const head = `
     <tr>
+      <th></th>
       <th>Bot</th>
       <th>Tipo</th>
       <th class="num">Hits</th>
@@ -469,8 +470,11 @@ function renderBotTopBotsTable(rows) {
       <th class="num">Bytes</th>
       <th class="num">URLs distintas</th>
     </tr>`;
+  // Cada fila + su drill-down row hidden debajo.
+  // Click en la fila → carga top 50 productos hitteados por ese bot.
   const body = rows.map((r) => `
-    <tr>
+    <tr class="bot-row" data-bot-name="${escapeHtml(r.bot_name)}">
+      <td class="caret">▸</td>
       <td>${escapeHtml(r.bot_name)}</td>
       <td>${tag(r)}</td>
       <td class="num">${fmt.int(r.hits)}</td>
@@ -478,8 +482,91 @@ function renderBotTopBotsTable(rows) {
       <td class="num"><span class="delta ${deltaClass(r.yoy.delta_pct.hits)}">${fmt.pct(r.yoy.delta_pct.hits)}</span></td>
       <td class="num">${fmt.bytes(r.total_bytes)}</td>
       <td class="num">${fmt.int(r.distinct_urls)}</td>
+    </tr>
+    <tr class="bot-drill hidden" data-bot-name="${escapeHtml(r.bot_name)}">
+      <td colspan="8"><div class="drill-content"><div class="drill-empty">click para cargar…</div></div></td>
     </tr>`).join("");
-  target.innerHTML = `<table><thead>${head}</thead><tbody>${body}</tbody></table>`;
+  target.innerHTML = `<table class="status-table"><thead>${head}</thead><tbody>${body}</tbody></table>`;
+
+  target.querySelectorAll(".bot-row").forEach((row) => {
+    row.addEventListener("click", () => toggleBotDrill(row));
+  });
+}
+
+// Cache local: bot_name → rows ya traidas.
+const _drillCacheBots = {};
+
+async function toggleBotDrill(row) {
+  const botName = row.dataset.botName;
+  const drillRow = document.querySelector(`#bot-top-bots-table .bot-drill[data-bot-name="${CSS.escape(botName)}"]`);
+  if (!drillRow) return;
+
+  const isOpen = !drillRow.classList.contains("hidden");
+  if (isOpen) {
+    drillRow.classList.add("hidden");
+    row.querySelector(".caret").textContent = "▸";
+    return;
+  }
+
+  drillRow.classList.remove("hidden");
+  row.querySelector(".caret").textContent = "▾";
+
+  if (_drillCacheBots[botName]) {
+    renderBotDrillContent(drillRow, _drillCacheBots[botName], botName);
+    return;
+  }
+
+  drillRow.querySelector(".drill-content").innerHTML =
+    `<div class="drill-loading"><div class="spinner"></div><span>cargando top productos de ${escapeHtml(botName)}…</span></div>`;
+
+  try {
+    const r = await fetchBotJSON(
+      `/tables/top-products-by-bot/${encodeURIComponent(botName)}`,
+      { limit: 50 }
+    );
+    _drillCacheBots[botName] = r.data;
+    renderBotDrillContent(drillRow, r.data, botName);
+  } catch (e) {
+    drillRow.querySelector(".drill-content").innerHTML =
+      `<div class="drill-empty">Error: ${escapeHtml(e.message)}</div>`;
+  }
+}
+
+function renderBotDrillContent(drillRow, data, botName) {
+  const rows = data.rows || [];
+  if (!rows.length) {
+    drillRow.querySelector(".drill-content").innerHTML =
+      `<div class="drill-empty">Sin URLs producto de ${escapeHtml(botName)} en este rango.</div>`;
+    return;
+  }
+  const head = `
+    <tr>
+      <th>URL producto</th>
+      <th>Sección</th>
+      <th class="num">Hits</th>
+      <th class="num">MoM</th>
+      <th class="num">YoY</th>
+      <th class="num">Bytes</th>
+    </tr>`;
+  const body = rows.map((r) => {
+    const path = r.url_path;
+    return `
+      <tr>
+        <td class="page-cell"><a href="https://www.endado.com${escapeHtml(path)}" target="_blank" rel="noopener" title="${escapeHtml(path)}">${escapeHtml(path)}</a></td>
+        <td>${escapeHtml(r.section_top ?? "—")}</td>
+        <td class="num">${fmt.int(r.hits)}</td>
+        <td class="num"><span class="delta ${deltaClass(r.mom.delta_pct.hits)}">${fmt.pct(r.mom.delta_pct.hits)}</span></td>
+        <td class="num"><span class="delta ${deltaClass(r.yoy.delta_pct.hits)}">${fmt.pct(r.yoy.delta_pct.hits)}</span></td>
+        <td class="num">${fmt.bytes(r.total_bytes)}</td>
+      </tr>`;
+  }).join("");
+  drillRow.querySelector(".drill-content").innerHTML =
+    `<div class="drill-meta">Top ${rows.length} URLs de <strong>producto</strong> hitteadas por <strong>${escapeHtml(botName)}</strong></div>` +
+    `<table class="drill-table"><thead>${head}</thead><tbody>${body}</tbody></table>`;
+}
+
+function _invalidateBotDrillCache() {
+  for (const k of Object.keys(_drillCacheBots)) delete _drillCacheBots[k];
 }
 
 function renderBotBySectionTable(rows) {
@@ -703,6 +790,7 @@ async function loadAllBots() {
 
 async function reloadBotsByDate() {
   _invalidateDrillCache();
+  _invalidateBotDrillCache();
   setLoading(true);
   try { await Promise.all([loadBotMetrics(), loadBotTables()]); }
   catch (e) { console.error(e); alert("Error: " + e.message); }
@@ -711,6 +799,7 @@ async function reloadBotsByDate() {
 
 async function reloadBotsByFilter() {
   _invalidateDrillCache();
+  _invalidateBotDrillCache();
   setLoading(true);
   try { await Promise.all([loadBotMetrics(), loadBotTrend(), loadBotTables()]); }
   catch (e) { console.error(e); alert("Error: " + e.message); }

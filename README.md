@@ -10,6 +10,7 @@ Lee de la DB de endado existente (Postgres en VPS), agrega KPIs / tablas / trend
 - **Trend de 24 meses** panoramico, agrupable por dia / semana / mes.
 - **4 vistas:** Overall, Productos, Categorias (hubs), `/recambios`.
 - **4 tablas:** Top productos, Top categorias, Oportunidades (queries pos 10-20), Canibalizacion de productos.
+- **Modo Bots** (tab aparte, consume [BOT-DASH-API](https://github.com/facundozupel/bot-dash-api)): KPIs de logs Apache, top URLs / top bots / by-section / by-status / by-type, **drill-down inline al click** en filas (status → URLs con ese status para un bot, bot → top 50 productos que hittea ese bot).
 
 ## Stack
 

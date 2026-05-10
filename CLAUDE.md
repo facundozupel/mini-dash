@@ -550,6 +550,24 @@ sshpass -p 'KWJuVnufxNLxLcWtqHxL' ssh -o StrictHostKeyChecking=no root@5.161.212
   'cd /opt/MICRO-DASH/dbt && /opt/MICRO-DASH/.venv-dbt/bin/dbt run'
 ```
 
+## Modo Bots (tab aparte del frontend)
+
+El front tambien renderea una pestaña "Bots" que consume **BOT-DASH-API**
+(`https://api-bots.facundo.click`, repo aparte). Esta API es independiente del
+backend MICRO-DASH — vive en otro VPS, otra DB (`endado-log`), otro pipeline dbt.
+
+Lo unico que hay del lado MICRO-DASH es el frontend (`frontend/main.js`,
+funciones `renderBot*`, `loadBot*`). Los drill-downs inline:
+
+- **Status drill** (click en fila de `/tables/by-status`) → URLs con ese
+  `status_class` para un bot seleccionable (`/tables/urls-by-status/...`).
+- **Bot drill** (click en fila de `/tables/top-bots`) → top 50 URLs de producto
+  que hittea ese bot, con MoM y YoY (`/tables/top-products-by-bot/{bot_name}`).
+
+Cada drill tiene su propio cache local en JS (`_drillCache`, `_drillCacheBots`)
+que se invalida en `reloadBotsByDate` y `reloadBotsByFilter`. El detalle de
+arquitectura, marts y endpoints vive en `BOT-DASH-API/CLAUDE.md`.
+
 ## Convenciones
 
 - Respuestas al usuario: **paso a paso, Feynman, poco verboso**. Una accion por turno cuando es grande, confirmar antes de pasos siguientes.
