@@ -92,9 +92,12 @@ Runbook completo en [`deploy/DEPLOY.md`](./deploy/DEPLOY.md). Incluye gotchas (e
 - [x] Cache "deepada": `@snapshot` decorator (L1) + `CacheStore` Protocol (testeable sin DB)
 - [x] Bucket cache (L2) para `/metrics/*` con componentes per-day reusables
 - [x] Stats hit/miss per-key (`/internal/cache/stats`) para decidir optimizaciones con datos
-- [x] Pipeline raw -> staging -> marts modelado en dbt + cron diario 03:00 + ANALYZE post-refresh + Healthchecks.io
+- [x] Pipeline raw -> staging -> marts modelado en dbt (2 staging + 4 marts) + cron diario 07:00 + ANALYZE post-refresh + Healthchecks.io
+- [x] **53 tests dbt** (not_null + unique + accepted_values + freshness + expression_is_true >= 0). Tests UNIQUE en tablas grandes scoped a `event_date >= CURRENT_DATE - 30 days` para no caer por disco.
+- [x] **Refresh estricto**: `refresh.sh` corre `dbt run → dbt test → ANALYZE → flush + prewarm`. Si `dbt test` falla, ABORTA (no ANALYZE, no prewarm). El cache de ayer sigue sirviendo data sana hasta arreglar. Mail con detalle del test que fallo via Healthchecks.io.
+- [x] **Consolidacion query_daily**: las dos MVs query-level (kpis_query_diario + canib_query_summary_daily) fusionadas en `marts.query_daily`. Opportunities y cannibalization leen del mismo fisico. -2 GB en disco, perf mejor.
 - [x] **Deploy productivo**: front en Render, back en VPS con Swarm/Traefik, TLS automatico
 - [x] Endpoint `/internal/cache/prewarm` enganchado al cron de dbt para que el cache rote con el dia
-- [x] Custom date ranges optimizados en las 4 tablas (filter-first + BRIN + ORDER BY event_date donde faltaba): top-products 8s→0.25s, opportunities 47s→2.6s, canib 23s→6s. Warm <0.05s.
+- [x] Custom date ranges optimizados: top-products 8s→0.25s, opportunities 47s→1.2s, canib 23s→4.1s. Warm <0.05s.
 - [ ] Tests unitarios
 - [ ] Auth (Google Sign-In + JWT)

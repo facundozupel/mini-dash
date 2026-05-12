@@ -25,7 +25,7 @@ models:
           combination_of_columns: [page, event_date]
 
   - name: endado_gsc_query_page_daily
-    description: "GSC query+page-level limpiado con flags pre-calculados. Grano (query, page, event_date)."
+    description: "GSC query+page-level limpiado con flags pre-calculados. Grano (query, page, event_date). VIEW (sin disco)."
     columns:
       - name: event_date
         tests: [not_null]
@@ -40,5 +40,11 @@ models:
       - name: is_brand
         tests: [not_null]
     tests:
+      # Scoped a 30d: el sort sobre 18M filas (la VIEW expande a la raw) no
+      # entra en pgsql_tmp. Al ser deterministico desde la raw, si la raw
+      # esta sana esta tambien. La unicidad historica esta garantizada por
+      # el test scoped en la raw (que tambien esta scoped igual).
       - dbt_utils.unique_combination_of_columns:
           combination_of_columns: [query, page, event_date]
+          config:
+            where: "event_date >= CURRENT_DATE - INTERVAL '30 days'"

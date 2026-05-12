@@ -32,25 +32,30 @@ models:
       - name: event_date
         tests: [not_null]
     tests:
+      # Scoped a 30d: ~10M filas no entran en pgsql_tmp con disco actual.
       - dbt_utils.unique_combination_of_columns:
           combination_of_columns: [filter, page, event_date]
+          config:
+            where: "event_date >= CURRENT_DATE - INTERVAL '30 days'"
 
-  - name: kpis_query_diario
-    description: "KPIs query-level con dedup MAX(impressions) pre-calculado. Sirve a /tables/opportunities."
+  - name: canib_query_page_daily
+    description: "MV de proyeccion sobre staging.endado_gsc_query_page_daily con BRIN(event_date)+btree(query). Sirve a /tables/cannibalization (detalle URLs)."
     columns:
       - name: query
+        tests: [not_null]
+      - name: page
         tests: [not_null]
       - name: event_date
         tests: [not_null]
     tests:
+      # Scoped a 30d: 14.6M filas no entran en pgsql_tmp con disco actual.
       - dbt_utils.unique_combination_of_columns:
-          combination_of_columns: [query, event_date]
+          combination_of_columns: [query, page, event_date]
+          config:
+            where: "event_date >= CURRENT_DATE - INTERVAL '30 days'"
 
-  - name: canib_query_page_daily
-    description: "MV de proyeccion sobre staging.endado_gsc_query_page_daily con BRIN(event_date)+btree(query). Sirve a /tables/cannibalization."
-
-  - name: canib_query_summary_daily
-    description: "Resumen per (query, dia) con clicks, impressions_dedup, all_product_today y array de pages. Sirve al primer paso de /tables/cannibalization (filtrado y ranking de queries canibalizantes)."
+  - name: query_daily
+    description: "Mart unificada query-level. Reemplaza a kpis_query_diario + canib_query_summary_daily (mismo grano, columnas se fusionan). Sirve a /tables/opportunities y /tables/cannibalization."
     columns:
       - name: query
         tests: [not_null]
@@ -58,10 +63,13 @@ models:
         tests: [not_null]
       - name: clicks
         tests: [not_null]
-      - name: impressions
+      - name: impressions_sum
         tests: [not_null]
       - name: impressions_dedup
         tests: [not_null]
     tests:
+      # Scoped a 30d: 14.6M filas no entran en pgsql_tmp con disco actual.
       - dbt_utils.unique_combination_of_columns:
           combination_of_columns: [query, event_date]
+          config:
+            where: "event_date >= CURRENT_DATE - INTERVAL '30 days'"

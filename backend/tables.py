@@ -1,8 +1,8 @@
 """
 Tablas del dashboard:
 - top_pages (top productos / top categorias): marts.top_pages_diario
-- opportunities (queries pos 10-20):           marts.kpis_query_diario + canib_query_page_daily
-- cannibalization (queries con >1 URL prod):   marts.canib_query_page_daily + marts.kpis_query_diario
+- opportunities (queries pos 10-20):           marts.query_daily + canib_query_page_daily
+- cannibalization (queries con >1 URL prod):   marts.query_daily + canib_query_page_daily
 """
 import datetime as dt
 
@@ -150,20 +150,17 @@ def _format_row(r: dict) -> dict:
 # =====================================================================
 #
 # Marts usados:
-#   - marts.kpis_query_diario       : impressions_dedup + pos_num + impressions_sum
-#                                     (la dedup MAX por (query, date) ya esta pre-calculada)
+#   - marts.query_daily             : impressions_dedup + pos_num + impressions_sum
+#                                     (la dedup MAX por (query, date) ya esta pre-calculada).
+#                                     Comparte fisico con cannibalization (mismo grano).
 #   - marts.canib_query_page_daily  : VIEW query+page+date para top_url
 
 _OPPORTUNITIES_SQL = """
 -- Patron filter-first, lookup-later:
 -- 1) Identificar las queries que pasan el filtro pos 10-20 + min_imp con UN
 --    solo scan al cur range. LIMIT 50.
--- 2) Para esas ~50 queries, lookups por btree(query) en los marts pesados:
---    top_url (canib_query_page_daily), MoM y YoY (kpis_query_diario).
---
--- Antes la query escaneaba 4 veces el universo entero (~150k queries) y recien
--- al final aplicaba el filtro pos 10-20. Resultado: 47s cold en custom range.
--- Ahora 3 de los 4 scans son lookups por lista (~50 queries).
+-- 2) Para esas ~50 queries, lookups por unique(query, event_date) en los marts:
+--    top_url (canib_query_page_daily), MoM y YoY (query_daily).
 
 WITH per_q AS (
     SELECT
@@ -171,7 +168,7 @@ WITH per_q AS (
         SUM(clicks)::bigint                              AS clicks,
         SUM(impressions_dedup)::bigint                   AS impressions,
         SUM(pos_num) / NULLIF(SUM(impressions_sum), 0)   AS position
-    FROM marts.kpis_query_diario
+    FROM marts.query_daily
     WHERE event_date BETWEEN %(cur_s)s AND %(cur_e)s
     GROUP BY query
 ),
@@ -184,7 +181,7 @@ qualified AS (
     ORDER BY impressions DESC
     LIMIT %(limit)s
 ),
--- Lookups: query IN (lista de ~50) → btree(query) hit, no seq scan.
+-- Lookups: query IN (lista de ~50) → index hit por leading column del unique.
 top_url AS (
     SELECT DISTINCT ON (query) query, page
     FROM (
@@ -201,7 +198,7 @@ per_q_mom AS (
         query,
         SUM(clicks)::bigint              AS clicks,
         SUM(impressions_dedup)::bigint   AS impressions
-    FROM marts.kpis_query_diario
+    FROM marts.query_daily
     WHERE event_date BETWEEN %(mom_s)s AND %(mom_e)s
       AND query IN (SELECT query FROM qualified)
     GROUP BY query
@@ -211,7 +208,7 @@ per_q_yoy AS (
         query,
         SUM(clicks)::bigint              AS clicks,
         SUM(impressions_dedup)::bigint   AS impressions
-    FROM marts.kpis_query_diario
+    FROM marts.query_daily
     WHERE event_date BETWEEN %(yoy_s)s AND %(yoy_e)s
       AND query IN (SELECT query FROM qualified)
     GROUP BY query
@@ -281,20 +278,16 @@ def compute_opportunities(from_: dt.date, to_: dt.date, limit: int = 50, min_imp
 # =====================================================================
 #
 # Lee de:
-#   - marts.canib_query_summary_daily : grano (query, dia) con clicks,
+#   - marts.query_daily             : grano (query, dia) con clicks,
 #     impressions_dedup, all_product_today y array `pages`. Sirve al filtro
 #     y ranking inicial sin tener que tocar el grano (query, page, dia).
-#   - marts.canib_query_page_daily    : grano (query, page, dia). Solo para el
+#     Comparte fisico con opportunities (mismo grano).
+#   - marts.canib_query_page_daily  : grano (query, page, dia). Solo para el
 #     detalle de URLs de las ~50 queries que ya pasaron el filtro.
-#
-# Antes esta query escaneaba canib_query_page_daily DOS veces (q_pages full
-# range + urls_detail) + kpis_query_diario otra vez para impressions_dedup.
-# Ahora un solo scan a la summary mart (mucho mas chica) hace el ranking,
-# y el detalle es un lookup por lista de queries (rapido).
 
 _CANNIBALIZATION_SQL = """
--- Single-pass sobre la summary mart: agrega clicks, impressions_dedup,
--- all_product y los arrays de pages per-day en una sola pasada (HashAggregate).
+-- Single-pass sobre query_daily: agrega clicks, impressions_dedup, all_product
+-- y los arrays de pages per-day en una sola pasada (HashAggregate).
 -- Despues calcula total_urls como subselect sobre las queries que ya pasan
 -- el filtro all_product (subplan corre solo para las ~5k candidates, no las 150k).
 WITH per_q AS (
@@ -304,7 +297,7 @@ WITH per_q AS (
         SUM(impressions_dedup)::bigint     AS impressions,
         BOOL_AND(all_product_today)        AS all_product,
         jsonb_agg(to_jsonb(pages))         AS pages_per_day
-    FROM marts.canib_query_summary_daily
+    FROM marts.query_daily
     WHERE event_date BETWEEN %(cur_s)s AND %(cur_e)s
     GROUP BY query
 ),

@@ -7,15 +7,28 @@ sources:
 
     tables:
       - name: extraccion_gsc
-        description: "GSC query+page+date. ~18M filas."
+        description: "GSC query+page+date. ~18M filas. Grano (query, page, date)."
         columns:
           - name: date
+            tests: [not_null]
+          - name: query
+            tests: [not_null]
+          - name: page
+            tests: [not_null]
+          - name: clicks
             tests:
               - not_null
-          - name: query
-          - name: page
-          - name: clicks
+              - dbt_utils.expression_is_true:
+                  expression: ">= 0"
+                  config:
+                    where: "date >= CURRENT_DATE - INTERVAL '30 days'"
           - name: impressions
+            tests:
+              - not_null
+              - dbt_utils.expression_is_true:
+                  expression: ">= 0"
+                  config:
+                    where: "date >= CURRENT_DATE - INTERVAL '30 days'"
           - name: position
           - name: prod_bool
           - name: blog
@@ -25,16 +38,38 @@ sources:
         freshness:
           warn_after: {count: 4, period: day}
           error_after: {count: 7, period: day}
+        tests:
+          # CRITICO: el grano (query, page, date) debe ser unico en la raw.
+          # Si GSC empieza a duplicar, toda la analitica downstream se infla.
+          # Scoped a 30d porque el sort sobre 18M filas no entra en disco
+          # libre. La raw es append-only: si los ultimos 30d estan sanos,
+          # lo historico tambien.
+          - dbt_utils.unique_combination_of_columns:
+              combination_of_columns: [query, page, date]
+              config:
+                where: "date >= CURRENT_DATE - INTERVAL '30 days'"
 
       - name: extraccion_gsc_page
-        description: "GSC page+date (agregado). ~2.7M filas."
+        description: "GSC page+date (agregado). ~2.7M filas. Grano (page, date)."
         columns:
           - name: date
+            tests: [not_null]
+          - name: page
+            tests: [not_null]
+          - name: clicks
             tests:
               - not_null
-          - name: page
-          - name: clicks
+              - dbt_utils.expression_is_true:
+                  expression: ">= 0"
+                  config:
+                    where: "date >= CURRENT_DATE - INTERVAL '30 days'"
           - name: impressions
+            tests:
+              - not_null
+              - dbt_utils.expression_is_true:
+                  expression: ">= 0"
+                  config:
+                    where: "date >= CURRENT_DATE - INTERVAL '30 days'"
           - name: position
           - name: prod_bool
           - name: blog
@@ -43,3 +78,8 @@ sources:
         freshness:
           warn_after: {count: 4, period: day}
           error_after: {count: 7, period: day}
+        tests:
+          - dbt_utils.unique_combination_of_columns:
+              combination_of_columns: [page, date]
+              config:
+                where: "date >= CURRENT_DATE - INTERVAL '30 days'"
